@@ -83,6 +83,16 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   });
 
   if (error) {
+    // 0204: um atendente comum só transfere conversa que já é dele. Puxar a de
+    // outro (ou a que a IA atende) é atribuição, e isso é de gerente/admin.
+    if (error.message.includes("agent_assignment_requires_manager")) {
+      return fail(
+        "forbidden_role",
+        "Só um gerente ou administrador pode reatribuir uma conversa que não é sua.",
+        403,
+        { requestId },
+      );
+    }
     return fail("internal_error", error.message, 500, { requestId });
   }
   const row = data?.[0];

@@ -102,7 +102,19 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
       p_expected_assignee: null,
       p_enforce_expected: true,
     });
-    if (rpcErr) return fail("internal_error", rpcErr.message, 500, { requestId });
+    if (rpcErr) {
+      // 0204: pausar uma conversa SEM dono implica assumi-la. Um atendente comum
+      // não assume a conversa que a IA atende — isso é de gerente/admin.
+      if (rpcErr.message.includes("agent_assignment_requires_manager")) {
+        return fail(
+          "forbidden_role",
+          "Só um gerente ou administrador pode assumir esta conversa da IA.",
+          403,
+          { requestId },
+        );
+      }
+      return fail("internal_error", rpcErr.message, 500, { requestId });
+    }
     if (!atribuida || (atribuida as unknown[]).length === 0) {
       return fail("state_conflict", "Outro atendente assumiu esta conversa agora.", 409, {
         requestId,

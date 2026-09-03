@@ -88,6 +88,14 @@ export interface OpcoesDoRadar {
   limit?: number;
   minHours?: number;
   now?: Date;
+  /**
+   * Quando presente, o radar só enxerga leads/demandas cujo dono humano é este
+   * usuário. O chamador passa isto para o papel `agent` (migration 0204: o
+   * `visibility_mode` passa a valer para contato/PII, e esta rota usa admin
+   * client, então o escopo vem por parâmetro em vez de RLS). manager/admin/
+   * platform-admin passam `undefined` e seguem org-wide.
+   */
+  restrictToOwnerUserId?: string | null;
 }
 
 export async function carregaRadarDeRisco(
@@ -99,14 +107,19 @@ export async function carregaRadarDeRisco(
   const minHours = opts.minHours ?? RADAR_MIN_HOURS_PADRAO;
   const now = opts.now ?? new Date();
   const nowIso = now.toISOString();
+  const restrictToOwnerUserId = opts.restrictToOwnerUserId ?? null;
 
-  const { data: leads, error: leadsErr } = await admin
+  let leadsQuery = admin
     .from("crm_leads")
     .select(
       "id, title, contact_id, owner_user_id, owner_kind, owner_agent_id, stage_id, last_activity_at, created_at, pipeline_id",
     )
     .eq("organization_id", organizationId)
-    .eq("status", "open")
+    .eq("status", "open");
+  if (restrictToOwnerUserId) {
+    leadsQuery = leadsQuery.eq("owner_user_id", restrictToOwnerUserId);
+  }
+  const { data: leads, error: leadsErr } = await leadsQuery
     .order("last_activity_at", { ascending: true, nullsFirst: true })
     .limit(SCAN_CAP);
   if (leadsErr) throw new Error(`radar_query_failed: ${leadsErr.message}`);
@@ -245,12 +258,16 @@ export async function carregaRadarDeRisco(
   // IA usa (lib/mcp/tools/retencao.ts), e a tela e o agente têm de dizer a
   // mesma coisa sobre o mesmo negócio. Reescrevê-la agora arriscaria essa
   // paridade sem necessidade; acrescentar não arrisca nada.
-  const { data: semPasso } = await admin
+  let semPassoQuery = admin
     .from("demandas")
     .select("id, contact_id, aberta_em, origem, contacts(display_name)")
     .eq("organization_id", organizationId)
     .is("fechada_em", null)
-    .is("proximo_passo", null)
+    .is("proximo_passo", null);
+  if (restrictToOwnerUserId) {
+    semPassoQuery = semPassoQuery.eq("dono_user_id", restrictToOwnerUserId);
+  }
+  const { data: semPasso } = await semPassoQuery
     .order("aberta_em", { ascending: true })
     .limit(limit);
 

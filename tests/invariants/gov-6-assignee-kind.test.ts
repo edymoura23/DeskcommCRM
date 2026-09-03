@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   GOV_AGENT_A,
+  GOV_MANAGER,
   GOV_ORG,
   GOV_SESSION,
   GOV_VIEWER,
@@ -178,8 +179,11 @@ describe("eixo 6 — G3-02: assignee_kind + guard INB-06a", () => {
     expect(roleAsSystem).toBe("agent");
   });
 
-  it("claim via fn segue válido para membro agent+ e marca kind='user'", () => {
-    const rows = assignAs(GOV_AGENT_A, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, true`);
+  it("claim via fn segue válido (feito por manager+ desde a 0204) e marca kind='user'", () => {
+    // 0204: um `agent` comum não reivindica conversa que não é dele. A
+    // atribuição a um membro agent+ segue válida — quem a faz é manager/admin —
+    // e continua marcando assignee_kind='user'.
+    const rows = assignAs(GOV_MANAGER, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, true`);
     expect(rows).toBe(1);
     expect(convState()).toBe(`user|${GOV_AGENT_A}`);
   });

@@ -66,6 +66,16 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   });
 
   if (error) {
+    // 0204: um atendente comum não assume conversa que não é dele — nem a que a
+    // IA atende, nem a de um colega. Quem distribui é gerente/admin.
+    if (error.message.includes("agent_assignment_requires_manager")) {
+      return fail(
+        "forbidden_role",
+        "Só um gerente ou administrador pode atribuir esta conversa.",
+        403,
+        { requestId },
+      );
+    }
     return fail("internal_error", error.message, 500, { requestId });
   }
   const row = data?.[0];

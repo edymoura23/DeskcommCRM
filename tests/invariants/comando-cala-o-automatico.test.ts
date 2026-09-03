@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   GOV_AGENT_A,
   GOV_AGENT_B,
+  GOV_MANAGER,
   GOV_ORG,
   GOV_SESSION,
   countAs,
@@ -78,7 +79,10 @@ describe("0173 — o comando da conversa muda o silêncio do automático", () =>
   });
 
   it("claim CALA o automático: bot_silenced_until vira 'infinity'", () => {
-    expect(atribuirComo(GOV_AGENT_A, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, true`)).toBe(1);
+    // 0204: quem atribui uma conversa a um atendente é manager/admin — um
+    // `agent` comum não a reivindica. O invariante deste caso (assumir cala o
+    // automático) não muda: 'claim' com destino grava 'infinity'.
+    expect(atribuirComo(GOV_MANAGER, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, true`)).toBe(1);
     expect(silencioDaConversa()).toBe("infinity");
   });
 
@@ -129,8 +133,8 @@ describe("0173 — o comando da conversa muda o silêncio do automático", () =>
                 status = 'pending'
           where id = '${CMD_CONV}';`);
 
-    // Uma pessoa assume o caso escalado…
-    expect(atribuirComo(GOV_AGENT_A, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, false`)).toBe(1);
+    // Uma pessoa assume o caso escalado (via manager/admin, desde a 0204)…
+    expect(atribuirComo(GOV_MANAGER, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, false`)).toBe(1);
     expect(silencioDaConversa()).toBe("infinity");
 
     // …vê que não é com ela, e libera. O silêncio da ESCALAÇÃO tem de sobreviver.
@@ -144,7 +148,7 @@ describe("0173 — o comando da conversa muda o silêncio do automático", () =>
     sql(`update public.conversations
             set last_handoff_at = null, last_handoff_reason = null
           where id = '${CMD_CONV}';`);
-    expect(atribuirComo(GOV_AGENT_A, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, false`)).toBe(1);
+    expect(atribuirComo(GOV_MANAGER, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, false`)).toBe(1);
     expect(
       atribuirComo(GOV_AGENT_A, `null::uuid, 'release', '${GOV_AGENT_A}'::uuid, true`),
     ).toBe(1);

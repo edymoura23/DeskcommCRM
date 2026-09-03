@@ -33,7 +33,11 @@ export async function GET(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "leads_at_risk" });
   if (!authz.ok) return authz.response;
-  const { org } = authz;
+  const { org, user } = authz;
+  // 0204: o Radar usa admin client (bypassa RLS), então o escopo do papel `agent`
+  // — que passou a valer para contato/PII — vem por parâmetro. manager/admin/
+  // platform-admin seguem org-wide.
+  const restrictToOwnerUserId = org.role === "agent" ? user.id : null;
 
   const parsed = querySchema.safeParse(
     Object.fromEntries(new URL(req.url).searchParams.entries()),
@@ -51,6 +55,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       organizationId: org.orgId,
       limit,
       minHours: min_hours,
+      restrictToOwnerUserId,
     });
     return ok(radar, { requestId });
   } catch {

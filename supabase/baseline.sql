@@ -17004,6 +17004,444 @@ revoke execute on function public.fn_conversation_assign(uuid, uuid, uuid, text,
 grant  execute on function public.fn_conversation_assign(uuid, uuid, uuid, text, uuid, boolean)
   to authenticated, service_role;
 
+-- ---- visibilidade de contato por atribuição + trava de claim do agent (migration 0204) ----
+--
+-- O `visibility_mode` (0035/0036) restringe conversations/messages/crm_leads/
+-- crm_lead_activities/crm_lead_links para o papel `agent` — e PARA aí. `contacts`
+-- (nome, telefone, e-mail, cpf_hash, birthdate) e as irmãs com PII/rastro do
+-- cliente (conversation_notes, agent_cases, demandas, crm_lead_scores,
+-- crm_lead_risk_states, crm_lead_reactivations, calendar_appointments) seguiam
+-- org-flat: um corretor comum listava e abria QUALQUER contato da org, buscava
+-- por telefone e via o Radar org-wide. E `fn_conversation_assign` — choke point
+-- de /claim, /transfer, /pause-ai — não tinha gate de papel: o corretor "assumia"
+-- a conversa que a IA atendia e furava a fila.
+--
+-- P1 fn_can_view_contact (irmã de fn_can_view_conversation/lead; viewer/manager/
+--    admin org-wide — viewer permanece org-wide de propósito, ele não reivindica
+--    conversa nem é dono de lead e é read-only; agent segue o visibility_mode,
+--    "meu" = ter conversa atribuída OU lead com owner para o contato).
+-- P2 contacts: FOR ALL -> por-comando; SELECT = fn_can_view_contact; escrita
+--    IDÊNTICA à de hoje (inbound é service_role e bypassa RLS).
+-- P3 irmãs herdam o pai sem novo vocabulário: EXISTS na conversa
+--    (conversation_notes, agent_cases, agent_case_events), EXISTS no lead via
+--    fn_can_view_lead (scores/risk_states/reactivations), fn_can_view_contact
+--    (demandas, calendar_appointments). Todas as FOR ALL viram por-comando.
+-- P5 fn_conversation_assign: (a) usuário de sessão não-manager+ com
+--    p_reason in ('claim','transfer') só age sobre conversa que já é dele
+--    (v_from = auth.uid()), senão raise 'agent_assignment_requires_manager';
+--    release/routing/handoff e chamador de sistema (uid nulo) passam; manager+
+--    passa. (b) owner-sync: claim/transfer adota o(s) lead(s) aberto(s) do
+--    contato; release/transfer sem destino solta o lead do liberador.
+--
+-- Aditiva, idempotente, auto-curativa. Genérica. Não muda contrato de API. Não
+-- implementa distribuição automática pós-handoff (backlog).
+-- ⚠️ ENTRA ANTES DO BLOCO DA VARREDURA anon, que é de propósito o último do arquivo.
+
+create or replace function public.fn_can_view_contact(
+  p_org uuid,
+  p_contact_id uuid
+) returns boolean
+language sql stable security definer
+set search_path = public
+as $$
+  select case
+    when public.fn_is_platform_admin() then true
+    when public.fn_user_role_in_org(p_org) is null then false
+    when public.fn_user_role_in_org(p_org) in ('viewer','manager','admin') then true
+    when p_contact_id is null then false
+    else case coalesce(
+           (select settings->>'visibility_mode' from public.organizations where id = p_org),
+           'own_and_unassigned')
+         when 'all' then true
+         when 'own_and_unassigned' then
+           not exists (
+             select 1 from public.conversations c
+              where c.organization_id = p_org
+                and c.contact_id = p_contact_id
+                and c.assigned_to_user_id is not null
+                and c.assigned_to_user_id <> auth.uid()
+           )
+           and not exists (
+             select 1 from public.crm_leads l
+              where l.organization_id = p_org
+                and l.contact_id = p_contact_id
+                and l.owner_user_id is not null
+                and l.owner_user_id <> auth.uid()
+           )
+         else
+           exists (
+             select 1 from public.conversations c
+              where c.organization_id = p_org
+                and c.contact_id = p_contact_id
+                and c.assigned_to_user_id = auth.uid()
+           )
+           or exists (
+             select 1 from public.crm_leads l
+              where l.organization_id = p_org
+                and l.contact_id = p_contact_id
+                and l.owner_user_id = auth.uid()
+           )
+       end
+  end;
+$$;
+
+revoke all     on function public.fn_can_view_contact(uuid, uuid) from public;
+revoke execute on function public.fn_can_view_contact(uuid, uuid) from anon;
+grant  execute on function public.fn_can_view_contact(uuid, uuid) to authenticated, service_role;
+
+-- P2 — contacts
+drop policy if exists "tenant_isolation_contacts_all" on public.contacts;
+drop policy if exists "contacts_select"        on public.contacts;
+drop policy if exists "contacts_agent_insert"  on public.contacts;
+drop policy if exists "contacts_agent_update"  on public.contacts;
+drop policy if exists "contacts_agent_delete"  on public.contacts;
+
+create policy "contacts_select" on public.contacts
+  for select using (
+    public.fn_can_view_contact(organization_id, id)
+  );
+create policy "contacts_agent_insert" on public.contacts
+  for insert with check (
+    (organization_id in (select public.fn_user_org_ids())) or public.fn_is_platform_admin()
+  );
+create policy "contacts_agent_update" on public.contacts
+  for update using (
+    (organization_id in (select public.fn_user_org_ids())) or public.fn_is_platform_admin()
+  ) with check (
+    (organization_id in (select public.fn_user_org_ids())) or public.fn_is_platform_admin()
+  );
+create policy "contacts_agent_delete" on public.contacts
+  for delete using (
+    (organization_id in (select public.fn_user_org_ids())) or public.fn_is_platform_admin()
+  );
+
+-- P3 — conversation_notes (SELECT herda a conversa; _write FOR ALL -> por-comando)
+drop policy if exists "conversation_notes_select" on public.conversation_notes;
+drop policy if exists "conversation_notes_write"  on public.conversation_notes;
+drop policy if exists "conversation_notes_insert" on public.conversation_notes;
+drop policy if exists "conversation_notes_update" on public.conversation_notes;
+drop policy if exists "conversation_notes_delete" on public.conversation_notes;
+
+create policy "conversation_notes_select" on public.conversation_notes
+  for select using (
+    public.fn_is_platform_admin()
+    or exists (
+      select 1 from public.conversations c
+      where c.id = conversation_notes.conversation_id
+    )
+  );
+create policy "conversation_notes_insert" on public.conversation_notes
+  for insert with check (
+    (organization_id in (select public.fn_user_org_ids()))
+    and public.fn_role_at_least(organization_id, 'agent')
+  );
+create policy "conversation_notes_update" on public.conversation_notes
+  for update using (
+    (organization_id in (select public.fn_user_org_ids()))
+    and public.fn_role_at_least(organization_id, 'agent')
+  ) with check (
+    (organization_id in (select public.fn_user_org_ids()))
+    and public.fn_role_at_least(organization_id, 'agent')
+  );
+create policy "conversation_notes_delete" on public.conversation_notes
+  for delete using (
+    (organization_id in (select public.fn_user_org_ids()))
+    and public.fn_role_at_least(organization_id, 'agent')
+  );
+
+-- P3 — agent_cases + agent_case_events (SELECT herda a conversa)
+drop policy if exists "tenant_isolation_agent_cases_all" on public.agent_cases;
+drop policy if exists "agent_cases_select" on public.agent_cases;
+drop policy if exists "agent_cases_insert" on public.agent_cases;
+drop policy if exists "agent_cases_update" on public.agent_cases;
+drop policy if exists "agent_cases_delete" on public.agent_cases;
+
+create policy "agent_cases_select" on public.agent_cases
+  for select using (
+    public.fn_is_platform_admin()
+    or exists (
+      select 1 from public.conversations c
+      where c.id = agent_cases.conversation_id
+    )
+  );
+create policy "agent_cases_insert" on public.agent_cases
+  for insert with check (organization_id in (select public.fn_user_org_ids()));
+create policy "agent_cases_update" on public.agent_cases
+  for update using (organization_id in (select public.fn_user_org_ids()))
+  with check (organization_id in (select public.fn_user_org_ids()));
+create policy "agent_cases_delete" on public.agent_cases
+  for delete using (organization_id in (select public.fn_user_org_ids()));
+
+drop policy if exists "tenant_isolation_agent_case_events_select" on public.agent_case_events;
+drop policy if exists "tenant_isolation_agent_case_events_insert" on public.agent_case_events;
+drop policy if exists "agent_case_events_select" on public.agent_case_events;
+drop policy if exists "agent_case_events_insert" on public.agent_case_events;
+
+create policy "agent_case_events_select" on public.agent_case_events
+  for select using (
+    public.fn_is_platform_admin()
+    or exists (
+      select 1 from public.agent_cases ac
+      where ac.id = agent_case_events.case_id
+    )
+  );
+create policy "agent_case_events_insert" on public.agent_case_events
+  for insert with check (organization_id in (select public.fn_user_org_ids()));
+
+-- P3 — crm_lead_scores / crm_lead_risk_states / crm_lead_reactivations
+--      (SELECT herda o lead via fn_can_view_lead — molde crm_lead_activities_select)
+drop policy if exists "tenant_isolation_crm_lead_scores_all" on public.crm_lead_scores;
+drop policy if exists "crm_lead_scores_select" on public.crm_lead_scores;
+drop policy if exists "crm_lead_scores_insert" on public.crm_lead_scores;
+drop policy if exists "crm_lead_scores_update" on public.crm_lead_scores;
+drop policy if exists "crm_lead_scores_delete" on public.crm_lead_scores;
+
+create policy "crm_lead_scores_select" on public.crm_lead_scores
+  for select using (
+    exists (
+      select 1 from public.crm_leads l
+      where l.id = crm_lead_scores.lead_id
+        and public.fn_can_view_lead(l.organization_id, l.owner_user_id)
+    )
+  );
+create policy "crm_lead_scores_insert" on public.crm_lead_scores
+  for insert with check (organization_id in (select public.fn_user_org_ids()));
+create policy "crm_lead_scores_update" on public.crm_lead_scores
+  for update using (organization_id in (select public.fn_user_org_ids()))
+  with check (organization_id in (select public.fn_user_org_ids()));
+create policy "crm_lead_scores_delete" on public.crm_lead_scores
+  for delete using (organization_id in (select public.fn_user_org_ids()));
+
+drop policy if exists "tenant_isolation_crm_lead_risk_states_all" on public.crm_lead_risk_states;
+drop policy if exists "crm_lead_risk_states_select" on public.crm_lead_risk_states;
+drop policy if exists "crm_lead_risk_states_insert" on public.crm_lead_risk_states;
+drop policy if exists "crm_lead_risk_states_update" on public.crm_lead_risk_states;
+drop policy if exists "crm_lead_risk_states_delete" on public.crm_lead_risk_states;
+
+create policy "crm_lead_risk_states_select" on public.crm_lead_risk_states
+  for select using (
+    exists (
+      select 1 from public.crm_leads l
+      where l.id = crm_lead_risk_states.lead_id
+        and public.fn_can_view_lead(l.organization_id, l.owner_user_id)
+    )
+  );
+create policy "crm_lead_risk_states_insert" on public.crm_lead_risk_states
+  for insert with check (organization_id in (select public.fn_user_org_ids()));
+create policy "crm_lead_risk_states_update" on public.crm_lead_risk_states
+  for update using (organization_id in (select public.fn_user_org_ids()))
+  with check (organization_id in (select public.fn_user_org_ids()));
+create policy "crm_lead_risk_states_delete" on public.crm_lead_risk_states
+  for delete using (organization_id in (select public.fn_user_org_ids()));
+
+drop policy if exists "tenant_isolation_crm_lead_reactivations_all" on public.crm_lead_reactivations;
+drop policy if exists "crm_lead_reactivations_select" on public.crm_lead_reactivations;
+drop policy if exists "crm_lead_reactivations_insert" on public.crm_lead_reactivations;
+drop policy if exists "crm_lead_reactivations_update" on public.crm_lead_reactivations;
+drop policy if exists "crm_lead_reactivations_delete" on public.crm_lead_reactivations;
+
+create policy "crm_lead_reactivations_select" on public.crm_lead_reactivations
+  for select using (
+    exists (
+      select 1 from public.crm_leads l
+      where l.id = crm_lead_reactivations.lead_id
+        and public.fn_can_view_lead(l.organization_id, l.owner_user_id)
+    )
+  );
+create policy "crm_lead_reactivations_insert" on public.crm_lead_reactivations
+  for insert with check (organization_id in (select public.fn_user_org_ids()));
+create policy "crm_lead_reactivations_update" on public.crm_lead_reactivations
+  for update using (organization_id in (select public.fn_user_org_ids()))
+  with check (organization_id in (select public.fn_user_org_ids()));
+create policy "crm_lead_reactivations_delete" on public.crm_lead_reactivations
+  for delete using (organization_id in (select public.fn_user_org_ids()));
+
+-- P3 — demandas (SELECT herda o CONTATO)
+drop policy if exists "tenant_isolation_demandas_all" on public.demandas;
+drop policy if exists "demandas_select" on public.demandas;
+drop policy if exists "demandas_insert" on public.demandas;
+drop policy if exists "demandas_update" on public.demandas;
+drop policy if exists "demandas_delete" on public.demandas;
+
+create policy "demandas_select" on public.demandas
+  for select using (
+    public.fn_can_view_contact(organization_id, contact_id)
+  );
+create policy "demandas_insert" on public.demandas
+  for insert with check (organization_id in (select * from public.fn_user_org_ids()));
+create policy "demandas_update" on public.demandas
+  for update using (organization_id in (select * from public.fn_user_org_ids()))
+  with check (organization_id in (select * from public.fn_user_org_ids()));
+create policy "demandas_delete" on public.demandas
+  for delete using (organization_id in (select * from public.fn_user_org_ids()));
+
+-- P3 — calendar_appointments (viewer/manager/admin org-wide — a agenda é leitura
+--      de supervisão, o gate dela é de ESCRITA; OU o atendente dono; OU o contato
+--      visível ao agent)
+drop policy if exists "tenant_isolation_calendar_appointments_all" on public.calendar_appointments;
+drop policy if exists "calendar_appointments_select" on public.calendar_appointments;
+drop policy if exists "calendar_appointments_write"  on public.calendar_appointments;
+drop policy if exists "calendar_appointments_insert" on public.calendar_appointments;
+drop policy if exists "calendar_appointments_update" on public.calendar_appointments;
+drop policy if exists "calendar_appointments_delete" on public.calendar_appointments;
+
+create policy "calendar_appointments_select" on public.calendar_appointments
+  for select using (
+    public.fn_is_platform_admin()
+    or public.fn_user_role_in_org(organization_id) in ('viewer','manager','admin')
+    or owner_user_id = auth.uid()
+    or (contact_id is not null and public.fn_can_view_contact(organization_id, contact_id))
+  );
+create policy "calendar_appointments_insert" on public.calendar_appointments
+  for insert with check (
+    public.fn_is_platform_admin()
+    or ((organization_id in (select public.fn_user_org_ids()))
+        and public.fn_role_at_least(organization_id, 'agent'))
+  );
+create policy "calendar_appointments_update" on public.calendar_appointments
+  for update using (
+    public.fn_is_platform_admin()
+    or ((organization_id in (select public.fn_user_org_ids()))
+        and public.fn_role_at_least(organization_id, 'agent'))
+  ) with check (
+    public.fn_is_platform_admin()
+    or ((organization_id in (select public.fn_user_org_ids()))
+        and public.fn_role_at_least(organization_id, 'agent'))
+  );
+create policy "calendar_appointments_delete" on public.calendar_appointments
+  for delete using (
+    public.fn_is_platform_admin()
+    or ((organization_id in (select public.fn_user_org_ids()))
+        and public.fn_role_at_least(organization_id, 'agent'))
+  );
+
+-- P5 — fn_conversation_assign: guard de papel + owner-sync
+create or replace function public.fn_conversation_assign(
+  p_organization_id uuid,
+  p_conversation_id uuid,
+  p_to_user_id uuid,
+  p_reason text,
+  p_expected_assignee uuid default null,
+  p_enforce_expected boolean default false
+) returns setof public.conversations
+language plpgsql security definer
+set search_path = public
+as $$
+declare
+  v_from uuid;
+  v_contact_id uuid;
+  v_conv public.conversations%rowtype;
+  v_is_manager boolean;
+begin
+  if auth.uid() is not null
+     and not public.fn_role_at_least(p_organization_id, 'agent') then
+    raise exception 'caller_not_authorized_for_org'
+      using hint = 'caller must be an active agent+ member of the organization';
+  end if;
+
+  if p_to_user_id is not null then
+    if coalesce(public.fn_member_role_in_org(p_to_user_id, p_organization_id), 'none')
+         not in ('agent','manager','admin') then
+      raise exception 'assignee_not_eligible_member'
+        using hint = 'target must be an active agent+ member of the organization';
+    end if;
+  end if;
+
+  select assigned_to_user_id, contact_id
+    into v_from, v_contact_id
+    from public.conversations
+   where id = p_conversation_id
+     and organization_id = p_organization_id
+   for update;
+
+  if not found then
+    return;
+  end if;
+
+  -- GUARD (0204): usuário de sessão não-manager+ só mexe numa atribuição que já
+  -- é dele. Barra o corretor comum de "assumir" a conversa que a IA atende
+  -- (v_from IS NULL) e de puxar a de outro — pelas rotas /claim e /transfer.
+  -- 'release'/'routing'/'handoff' e o chamador sem auth.uid() (cron/service_role)
+  -- passam. manager/admin/platform-admin passam.
+  v_is_manager := (auth.uid() is null) or public.fn_role_at_least(p_organization_id, 'manager');
+  if not v_is_manager
+     and p_reason in ('claim','transfer')
+     and v_from is distinct from auth.uid() then
+    raise exception 'agent_assignment_requires_manager'
+      using hint = 'a common agent cannot pick up or reassign a conversation that is not already theirs; ask a manager/admin to assign it';
+  end if;
+
+  if p_enforce_expected and v_from is distinct from p_expected_assignee then
+    return;
+  end if;
+
+  update public.conversations
+     set assigned_to_user_id = p_to_user_id,
+         assigned_to_user_name = case
+           when p_to_user_id is null then null
+           else (select raw_user_meta_data ->> 'full_name' from auth.users where id = p_to_user_id)
+         end,
+         assigned_at = case when p_to_user_id is null then null else now() end,
+         assignee_kind = case when p_to_user_id is null then null else 'user' end,
+         status = case when p_to_user_id is null then 'open' else 'claimed' end,
+         status_changed_at = now(),
+         unread_count_for_assignee = 0,
+         bot_silenced_until = case
+           when p_reason = 'routing'  then bot_silenced_until
+           when p_to_user_id is null  then (case when last_handoff_at is null
+                                                 then null
+                                                 else bot_silenced_until end)
+           else 'infinity'::timestamptz
+         end,
+         updated_at = now()
+   where id = p_conversation_id
+   returning * into v_conv;
+
+  insert into public.conversation_assignment_events
+    (organization_id, conversation_id, from_user_id, to_user_id, changed_by, reason)
+  values
+    (p_organization_id, p_conversation_id, v_from, p_to_user_id, auth.uid(), p_reason);
+
+  -- OWNER-SYNC (0204): atribuir a conversa vale também para o(s) lead(s)
+  -- aberto(s) do contato — sem isso o corretor via a conversa mas não o
+  -- card/timeline (com 'own', fn_can_view_lead nega). Mesma adoção do rodízio
+  -- (adotarLeadsDoContato); trio owner_* coerente. 'routing' fora: o worker do
+  -- rodízio chama adotarLeadsDoContato ele mesmo. 'release' solta o lead junto.
+  if v_contact_id is not null and p_reason in ('claim','transfer','release') then
+    if p_to_user_id is not null then
+      update public.crm_leads
+         set owner_user_id  = p_to_user_id,
+             owner_kind     = 'user',
+             owner_agent_id = null,
+             updated_at     = now()
+       where organization_id = p_organization_id
+         and contact_id      = v_contact_id
+         and status          = 'open'
+         and owner_user_id is distinct from p_to_user_id;
+    else
+      update public.crm_leads
+         set owner_user_id  = null,
+             owner_kind     = null,
+             owner_agent_id = null,
+             updated_at     = now()
+       where organization_id = p_organization_id
+         and contact_id      = v_contact_id
+         and status          = 'open'
+         and owner_user_id is not distinct from v_from;
+    end if;
+  end if;
+
+  return next v_conv;
+end;
+$$;
+
+revoke all     on function public.fn_conversation_assign(uuid, uuid, uuid, text, uuid, boolean) from public;
+revoke execute on function public.fn_conversation_assign(uuid, uuid, uuid, text, uuid, boolean) from anon;
+grant  execute on function public.fn_conversation_assign(uuid, uuid, uuid, text, uuid, boolean)
+  to authenticated, service_role;
+
+notify pgrst, 'reload schema';
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ ESTE BLOCO É, DE PROPÓSITO, O ÚLTIMO DO ARQUIVO. Apêndice novo entra ANTES

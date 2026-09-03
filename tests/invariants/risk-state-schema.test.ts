@@ -47,11 +47,19 @@ describe("0078 · estado de risco chega ao clone", () => {
     expect(
       sql(`select relrowsecurity from pg_class where relname = 'crm_lead_risk_states'`),
     ).toBe("t");
+    // A migration 0204 trocou a FOR ALL `tenant_isolation_crm_lead_risk_states_all`
+    // por policies POR-COMANDO (armadilha G4-01). O SELECT herda o lead via
+    // fn_can_view_lead; a escrita segue org-flat como antes.
+    expect(
+      sql(`select count(*) from pg_policies
+            where tablename = 'crm_lead_risk_states'
+              and policyname = 'crm_lead_risk_states_select'`),
+    ).toBe("1");
     expect(
       sql(`select count(*) from pg_policies
             where tablename = 'crm_lead_risk_states'
               and policyname = 'tenant_isolation_crm_lead_risk_states_all'`),
-    ).toBe("1");
+    ).toBe("0");
   });
 
   it("DENTRO da publicação de realtime — e o score continua FORA", () => {

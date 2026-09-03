@@ -71,19 +71,25 @@ beforeAll(() => {
 
 describe("eixo 3 — G3-01: eventos de atribuição", () => {
   it("claim via fn_conversation_assign atribui E grava evento reason='claim' na mesma transação", () => {
-    const rows = assignAs(GOV_AGENT_A, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, true`);
+    // 0204: um `agent` comum não reivindica conversa que não é dele — quem
+    // atribui é manager/admin. O invariante deste caso (evento na MESMA
+    // transação da mudança de dono) segue valendo, só muda o `changed_by`.
+    const rows = assignAs(GOV_MANAGER, `'${GOV_AGENT_A}'::uuid, 'claim', null::uuid, true`);
     expect(rows).toBe(1);
 
     expect(
       eventCount(
         `reason = 'claim' and from_user_id is null
-         and to_user_id = '${GOV_AGENT_A}' and changed_by = '${GOV_AGENT_A}'`,
+         and to_user_id = '${GOV_AGENT_A}' and changed_by = '${GOV_MANAGER}'`,
       ),
     ).toBe(1);
   });
 
   it("claim duplicado: optimistic lock perde (0 rows → rota 409) e ZERO evento duplicado", () => {
-    const rows = assignAs(GOV_AGENT_B, `'${GOV_AGENT_B}'::uuid, 'claim', null::uuid, true`);
+    // O lock: expected=null mas a conversa já é do AGENT_A (caso anterior) →
+    // v_from distinto de p_expected → 0 rows, sem evento. Feito pelo MANAGER
+    // porque, desde a 0204, o `agent` comum nem chega no lock.
+    const rows = assignAs(GOV_MANAGER, `'${GOV_AGENT_B}'::uuid, 'claim', null::uuid, true`);
     expect(rows).toBe(0);
 
     // Nenhum evento novo: segue exatamente 1 claim registrado.
@@ -134,8 +140,8 @@ describe("eixo 3 — G3-01: eventos de atribuição", () => {
     // Estado neste ponto da sequência: a conversa foi transferida para B e depois
     // LIBERADA por B (`release`), então está sem dono — e em
     // `own_and_unassigned`, que é o default, conversa sem dono é visível a todo
-    // agent. Reivindicá-la para B é o que põe A fora do escopo.
-    expect(assignAs(GOV_AGENT_B, `'${GOV_AGENT_B}'::uuid, 'claim', null::uuid, true`)).toBe(1);
+    // agent. Atribuí-la a B (manager, desde a 0204) é o que põe A fora do escopo.
+    expect(assignAs(GOV_MANAGER, `'${GOV_AGENT_B}'::uuid, 'claim', null::uuid, true`)).toBe(1);
 
     // O controle primeiro: a conversa mesma já era invisível para A antes desta
     // migration. Sem esta asserção, um 0 na linha seguinte não distinguiria
@@ -181,9 +187,11 @@ describe("eixo 3 — G3-01: eventos de atribuição", () => {
     );
     expect(deleted).toBe(0);
 
-    // Os eventos continuam lá (história intacta). São QUATRO: claim(A),
-    // transfer(A→B), release(B) e o claim(B) do caso do escopo herdado — o claim
-    // duplicado de B perdeu o lock e, de propósito, não gravou nada.
+    // Os eventos continuam lá (história intacta). São QUATRO: claim(→A),
+    // transfer(A→B), release(B) e o claim(→B) do caso do escopo herdado — o
+    // claim que perdeu o lock (expected desencontrado) não gravou nada. Desde a
+    // 0204, os dois claims são feitos pelo MANAGER; o `changed_by` muda, a
+    // contagem não.
     expect(eventCount("true")).toBe(4);
   });
 });

@@ -55,11 +55,20 @@ describe("0082 · proposta de reativação chega ao clone", () => {
     expect(
       sql(`select relrowsecurity from pg_class where relname='crm_lead_reactivations'`),
     ).toBe("t");
+    // A migration 0204 trocou a FOR ALL `tenant_isolation_crm_lead_reactivations_all`
+    // por policies POR-COMANDO (a armadilha G4-01: o USING de um FOR ALL governa o
+    // SELECT junto). O SELECT herda o lead via fn_can_view_lead; a escrita segue
+    // org-flat como antes.
+    expect(
+      sql(`select count(*) from pg_policies
+            where tablename='crm_lead_reactivations'
+              and policyname='crm_lead_reactivations_select'`),
+    ).toBe("1");
     expect(
       sql(`select count(*) from pg_policies
             where tablename='crm_lead_reactivations'
               and policyname='tenant_isolation_crm_lead_reactivations_all'`),
-    ).toBe("1");
+    ).toBe("0");
   });
 
   it("DENTRO da publicação de realtime — proposta é estado, não telemetria", () => {
