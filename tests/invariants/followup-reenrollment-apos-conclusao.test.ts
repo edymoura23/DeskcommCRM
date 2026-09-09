@@ -24,13 +24,22 @@ import type { FlowGraph } from "@/lib/followup/graph-schema";
  * não virar acidente amanhã.
  *
  * ⚠️ ISTO NÃO É UM BUG TOLERADO, e quem achar este arquivo daqui a seis meses
- * precisa ler isto antes de "consertar": é a mesma propriedade que
- * `lib/followup/silence-sweep.ts` já documenta no próprio cabeçalho — "um
- * contato que COMPLETOU ou foi cancelado pode ser re-enrollado na varredura
- * seguinte se continuar silencioso; aceitável no MVP, sem cooldown table". O
- * gatilho de etapa herda a mesma regra, de propósito: duas políticas de
- * re-entrada para o mesmo motor seriam duas verdades sobre quando um contato
- * pode voltar à fila.
+ * precisa ler isto antes de "consertar": o gatilho de ETAPA re-entra num SINAL
+ * NOVO (uma linha nova de `lead.stage_changed` no event_log) — nunca na
+ * persistência de um sinal antigo, porque a mensagem do próprio fluxo não move
+ * etapa. Não há auto-laço aqui; carência ARBITRÁRIA (esperar N dias sem sinal
+ * novo) continua sendo o que este arquivo congela contra.
+ *
+ * ⚠️ DIVERGÊNCIA DELIBERADA COM O GATILHO DE SILÊNCIO (2026-09-08). O
+ * `silence-sweep.ts` re-inscrevia na PERSISTÊNCIA do silêncio: um contato que
+ * parou de responder ficava "silencioso desde X" para sempre e cada sequência
+ * esgotada gerava a próxima (laço medido em produção — JBA/Corteux). O conserto
+ * de lá NÃO é uma carência: é exigir um EPISÓDIO NOVO — inbound real posterior
+ * ao fim do último enrollment terminal —, que é o análogo, para um gatilho
+ * time-driven por AUSÊNCIA, do "sinal novo" que ETAPA já tem de graça. As duas
+ * políticas seguem sendo a MESMA ideia ("só re-entra num sinal novo"),
+ * instanciada por gatilho. Isto aqui permanece verde: nada em `gatilho-etapa`,
+ * `gatilho-caso` ou `reactivity` mudou.
  *
  * ⚠️ O QUE O CONSERTO DO EMISSOR MUDOU AQUI FOI A PROBABILIDADE, NÃO A REGRA.
  * Antes de `agent-stage-sync` passar a emitir `lead.stage_changed`, só movimento
