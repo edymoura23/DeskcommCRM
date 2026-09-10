@@ -1162,13 +1162,16 @@ function rdStationEnvelope(opts: {
   celular?: string | null;
   eventUuid?: string | null;
   leadId?: string;
+  /** `undefined` → "jardim-bela-aurora" (padrão); string → usa; `null` → omite os dois campos. */
+  conversionIdentifier?: string | null;
 }) {
   const eventUuid = opts.eventUuid === undefined ? "22222222-2222-4222-8222-000000000001" : opts.eventUuid;
   const celular = opts.celular === undefined ? "+55 (11) 98888-7777" : opts.celular;
+  const convId =
+    opts.conversionIdentifier === undefined ? "jardim-bela-aurora" : opts.conversionIdentifier;
   const content: Record<string, unknown> = {
     event_type: "CONVERSION",
-    identificador: "jardim-bela-aurora",
-    conversion_identifier: "jardim-bela-aurora",
+    ...(convId === null ? {} : { identificador: convId, conversion_identifier: convId }),
     conversion_url: "https://viver.example.com.br/jardim-bela-aurora",
     email_lead: opts.email === undefined ? "maria.rd@example.com" : opts.email,
     Nome: opts.name === undefined ? "Maria RD" : opts.name,
@@ -1230,7 +1233,15 @@ describe("POST /api/v1/webhooks/in/[token] — RD Station (envelope leads[])", (
   });
 
   it("rd 2 — MESMO event_uuid reenviado NÃO duplica: 200 com o lead existente", async () => {
-    const payload = rdStationEnvelope({ eventUuid: "aaaa0002-0000-4000-8000-000000000002", leadId: "5035999002" });
+    // contato próprio (telefone + e-mail distintos): sem isso, o e-mail default
+    // colapsaria neste contato o da rd 1, cujo lead ABERTO com o mesmo
+    // conversion_identifier faria o guard de reconversão absorver este POST.
+    const payload = rdStationEnvelope({
+      eventUuid: "aaaa0002-0000-4000-8000-000000000002",
+      leadId: "5035999002",
+      mobilePhone: "+55 (11) 98888-0002",
+      email: "maria.rd2@example.com",
+    });
     const first = await POST(jsonReq(TOKEN_RDSTATION, payload), reqCtx(TOKEN_RDSTATION));
     const firstId = ((await first.json()) as { data: { lead_id: string } }).data.lead_id;
 
@@ -1246,7 +1257,13 @@ describe("POST /api/v1/webhooks/in/[token] — RD Station (envelope leads[])", (
   });
 
   it("rd 3 — sem event_uuid: usa rdstation:lead:<id> como chave de idempotência", async () => {
-    const payload = rdStationEnvelope({ eventUuid: null, leadId: "5035999003" });
+    // contato próprio, pelo mesmo motivo da rd 2.
+    const payload = rdStationEnvelope({
+      eventUuid: null,
+      leadId: "5035999003",
+      mobilePhone: "+55 (11) 98888-0003",
+      email: "maria.rd3@example.com",
+    });
     const res = await POST(jsonReq(TOKEN_RDSTATION, payload), reqCtx(TOKEN_RDSTATION));
     expect(res.status).toBe(200);
     const leadId = ((await res.json()) as { data: { lead_id: string } }).data.lead_id;
@@ -1317,5 +1334,212 @@ describe("POST /api/v1/webhooks/in/[token] — RD Station (envelope leads[])", (
     const lead = rows(`select external_id, title from public.crm_leads where id = '${leadId}'`)[0]!;
     expect(lead.title).toBe("Flat No RD Source");
     expect(lead.external_id).toBeNull(); // genérico sem external_id de topo
+  });
+});
+
+/**
+ * POST /api/v1/webhooks/in/[token] — RECONVERSÃO + ENRIQUECIMENTO (achado
+ * 2026-09-09, decisões humanas do gate).
+ *
+ * MESMO contato convertendo de novo no MESMO funil + MESMO conversion_identifier:
+ *   • lead anterior ABERTO  → NÃO cria card; atividade `webhook_reconversion` no
+ *     lead aberto; captação outcome 'reconversao'; NÃO redispara 1º toque.
+ *   • retry do MESMO event_uuid de reconversão → 'duplicado', sem 2ª atividade.
+ *   • lead anterior FECHADO (won/lost) → cria card novo + atividade marcadora no
+ *     lead fechado (histórico preservado).
+ *   • conversion_identifier diferente / ausente → comportamento atual (1 lead
+ *     por conversão), sem atividade de reconversão.
+ * Enriquecimento conservador do contato: nome técnico → nome plausível; nunca
+ * sobrescreve nome válido; nunca telefone.
+ *
+ * Genérico e por `organization_id` — nada acoplado a empreendimento. JBA é só o
+ * dado da fixture.
+ */
+function recon(over: {
+  ev: string;
+  leadId: string;
+  phone?: string;
+  name?: string | null;
+  email?: string | null;
+  convId?: string | null;
+}) {
+  const phone = over.phone ?? "+55 (32) 90000-1000";
+  return rdStationEnvelope({
+    eventUuid: over.ev,
+    leadId: over.leadId,
+    mobilePhone: phone,
+    name: over.name === undefined ? "Contato Recon" : over.name,
+    // E-mail DERIVADO do telefone do cenário: constante dentro do teste (as
+    // duas conversões usam o mesmo telefone) e DISTINTO entre testes. Um
+    // e-mail fixo compartilhado colapsaria todos os contatos rc num só via
+    // uniq_contacts_org_email (o tratador de corrida da rota resolve por
+    // e-mail), contaminando as contagens de lead/atividade entre cenários.
+    email: over.email === undefined ? `recon-${phone.replace(/\D/g, "")}@example.com` : over.email,
+    conversionIdentifier: over.convId === undefined ? "jardim-bela-aurora" : over.convId,
+  });
+}
+const post = (body: Record<string, unknown>) => POST(jsonReq(TOKEN_RDSTATION, body), reqCtx(TOKEN_RDSTATION));
+const leadIdDe = async (res: Response) => ((await res.json()) as { data: { lead_id: string } }).data.lead_id;
+
+describe("POST /api/v1/webhooks/in/[token] — reconversão + enriquecimento", () => {
+  it("rc 1 — mesmo contato + lead ABERTO + mesmo conversion_identifier: sem card novo, atividade webhook_reconversion, captação 'reconversao'", async () => {
+    const phone = "+55 (32) 90000-2001";
+    const r1 = await post(recon({ ev: "bbbb0001-0000-4000-8000-000000000001", leadId: "6001000001", phone }));
+    const l1 = await leadIdDe(r1);
+
+    const r2 = await post(recon({ ev: "bbbb0001-0000-4000-8000-000000000002", leadId: "6001000001", phone }));
+    expect(r2.status).toBe(200);
+    expect(await leadIdDe(r2)).toBe(l1);
+
+    const contactId = rows(`select contact_id from public.crm_leads where id = '${l1}'`)[0]!.contact_id as string;
+    const nLeads = rows(
+      `select count(*)::int as n from public.crm_leads where organization_id = '${GOV_ORG}' and contact_id = '${contactId}'`,
+    )[0]!.n;
+    expect(nLeads).toBe(1); // NENHUM card novo
+
+    const acts = rows(
+      `select payload from public.crm_lead_activities where lead_id = '${l1}' and type = 'webhook_reconversion'`,
+    );
+    expect(acts).toHaveLength(1);
+    expect((acts[0]!.payload as Record<string, unknown>).event_uuid).toBe("bbbb0001-0000-4000-8000-000000000002");
+
+    const caps = rows(
+      `select outcome from public.webhook_lead_captures where lead_id = '${l1}' order by received_at`,
+    );
+    expect(caps.map((c) => c.outcome)).toEqual(["criado", "reconversao"]);
+  });
+
+  it("rc 2 — retry do MESMO event_uuid da reconversão: 'duplicado', sem 2ª atividade", async () => {
+    const phone = "+55 (32) 90000-2002";
+    const r1 = await post(recon({ ev: "bbbb0002-0000-4000-8000-000000000001", leadId: "6002000001", phone }));
+    const l1 = await leadIdDe(r1);
+    const reconPayload = recon({ ev: "bbbb0002-0000-4000-8000-000000000002", leadId: "6002000001", phone });
+    await post(reconPayload);
+    const r3 = await post(reconPayload); // retry idêntico
+    expect(r3.status).toBe(200);
+    expect(await leadIdDe(r3)).toBe(l1);
+
+    const acts = rows(
+      `select id from public.crm_lead_activities where lead_id = '${l1}' and type = 'webhook_reconversion'`,
+    );
+    expect(acts).toHaveLength(1); // uma só, não duas
+
+    const caps = rows(`select outcome from public.webhook_lead_captures where lead_id = '${l1}' order by received_at`);
+    expect(caps.map((c) => c.outcome)).toEqual(["criado", "reconversao", "duplicado"]);
+  });
+
+  it("rc 3 — lead anterior GANHO: cria card novo + atividade webhook_reconversion_after_won no lead ganho (histórico intacto)", async () => {
+    const phone = "+55 (32) 90000-2003";
+    const r1 = await post(recon({ ev: "bbbb0003-0000-4000-8000-000000000001", leadId: "6003000001", phone }));
+    const l1 = await leadIdDe(r1);
+    sql(`update public.crm_leads set status = 'won', closed_at = now() where id = '${l1}';`);
+
+    const r2 = await post(recon({ ev: "bbbb0003-0000-4000-8000-000000000002", leadId: "6003000001", phone }));
+    const l2 = await leadIdDe(r2);
+    expect(l2).not.toBe(l1);
+
+    const l1row = rows(`select status, closed_at from public.crm_leads where id = '${l1}'`)[0]!;
+    expect(l1row.status).toBe("won"); // intacto
+    expect(l1row.closed_at).not.toBeNull();
+
+    const marca = rows(
+      `select type, payload from public.crm_lead_activities where lead_id = '${l1}' and type = 'webhook_reconversion_after_won'`,
+    );
+    expect(marca).toHaveLength(1);
+    expect((marca[0]!.payload as Record<string, unknown>).novo_lead_id).toBe(l2);
+
+    expect(rows(`select external_id from public.crm_leads where id = '${l2}'`)[0]!.external_id).toBe(
+      "rdstation:evt:bbbb0003-0000-4000-8000-000000000002",
+    );
+  });
+
+  it("rc 4 — mesmo contato, conversion_identifier DIFERENTE: cria card novo, sem reconversão", async () => {
+    const phone = "+55 (32) 90000-2004";
+    const r1 = await post(
+      recon({ ev: "bbbb0004-0000-4000-8000-000000000001", leadId: "6004000001", phone, convId: "empreendimento-a" }),
+    );
+    const l1 = await leadIdDe(r1);
+    const r2 = await post(
+      recon({ ev: "bbbb0004-0000-4000-8000-000000000002", leadId: "6004000001", phone, convId: "empreendimento-b" }),
+    );
+    const l2 = await leadIdDe(r2);
+    expect(l2).not.toBe(l1);
+    const contactId = rows(`select contact_id from public.crm_leads where id = '${l1}'`)[0]!.contact_id as string;
+    expect(
+      rows(`select count(*)::int as n from public.crm_leads where contact_id = '${contactId}'`)[0]!.n,
+    ).toBe(2);
+    expect(
+      rows(`select count(*)::int as n from public.crm_lead_activities where type like 'webhook_reconversion%' and lead_id = '${l1}'`)[0]!.n,
+    ).toBe(0);
+  });
+
+  it("rc 5 — webhook SEM conversion_identifier: comportamento atual, 1 lead por conversão, sem reconversão", async () => {
+    const phone = "+55 (32) 90000-2005";
+    const r1 = await post(recon({ ev: "bbbb0005-0000-4000-8000-000000000001", leadId: "6005000001", phone, convId: null }));
+    const l1 = await leadIdDe(r1);
+    const r2 = await post(recon({ ev: "bbbb0005-0000-4000-8000-000000000002", leadId: "6005000001", phone, convId: null }));
+    const l2 = await leadIdDe(r2);
+    expect(l2).not.toBe(l1);
+    const contactId = rows(`select contact_id from public.crm_leads where id = '${l1}'`)[0]!.contact_id as string;
+    expect(rows(`select count(*)::int as n from public.crm_leads where contact_id = '${contactId}'`)[0]!.n).toBe(2);
+  });
+
+  it("rc 6 — enriquecimento: nome técnico ('34343') vira nome plausível na reconversão; telefone nunca muda; atividade contact_enriched com antes/depois", async () => {
+    const phone = "+55 (32) 90000-2006";
+    const r1 = await post(
+      recon({ ev: "bbbb0006-0000-4000-8000-000000000001", leadId: "6006000001", phone, name: "34343", email: null }),
+    );
+    const l1 = await leadIdDe(r1);
+    const contactId = rows(`select contact_id from public.crm_leads where id = '${l1}'`)[0]!.contact_id as string;
+    expect(rows(`select name from public.contacts where id = '${contactId}'`)[0]!.name).toBe("34343");
+    const phoneAntes = rows(`select phone_number from public.contacts where id = '${contactId}'`)[0]!.phone_number;
+
+    await post(
+      recon({
+        ev: "bbbb0006-0000-4000-8000-000000000002",
+        leadId: "6006000001",
+        phone,
+        name: "Mariana Boa Silva",
+        email: "mariana.boa@example.com",
+      }),
+    );
+    const c = rows(`select name, email, phone_number from public.contacts where id = '${contactId}'`)[0]!;
+    expect(c.name).toBe("Mariana Boa Silva"); // técnico → plausível
+    expect(c.email).toBe("mariana.boa@example.com"); // vazio → válido
+    expect(c.phone_number).toBe(phoneAntes); // NUNCA muda
+
+    const enr = rows(
+      `select payload from public.crm_lead_activities where lead_id = '${l1}' and type = 'contact_enriched'`,
+    );
+    expect(enr).toHaveLength(1);
+    const alt = (enr[0]!.payload as { alteracoes: Array<{ campo: string; de: string | null; para: string }> }).alteracoes;
+    const nome = alt.find((a) => a.campo === "name")!;
+    expect(nome.de).toBe("34343");
+    expect(nome.para).toBe("Mariana Boa Silva");
+  });
+
+  it("rc 7 — enriquecimento NUNCA sobrescreve nome já válido", async () => {
+    const phone = "+55 (32) 90000-2007";
+    const r1 = await post(
+      recon({ ev: "bbbb0007-0000-4000-8000-000000000001", leadId: "6007000001", phone, name: "Ana Valida Nome", email: null }),
+    );
+    const l1 = await leadIdDe(r1);
+    const contactId = rows(`select contact_id from public.crm_leads where id = '${l1}'`)[0]!.contact_id as string;
+
+    await post(
+      recon({ ev: "bbbb0007-0000-4000-8000-000000000002", leadId: "6007000001", phone, name: "34343", email: null }),
+    );
+    expect(rows(`select name from public.contacts where id = '${contactId}'`)[0]!.name).toBe("Ana Valida Nome");
+    expect(
+      rows(`select count(*)::int as n from public.crm_lead_activities where lead_id = '${l1}' and type = 'contact_enriched'`)[0]!.n,
+    ).toBe(0);
+  });
+
+  it("rc 8 — payload FLAT no mesmo endpoint segue sem guard de reconversão (só o caminho com conversion_identifier entra)", async () => {
+    const flat1 = await post({ nome: "Flat Sem Recon", telefone: "32955552008" });
+    const flatId1 = await leadIdDe(flat1);
+    const flat2 = await post({ nome: "Flat Sem Recon", telefone: "32955552008" });
+    const flatId2 = await leadIdDe(flat2);
+    expect(flatId2).not.toBe(flatId1); // genérico: 1 lead por POST, sem guard
   });
 });

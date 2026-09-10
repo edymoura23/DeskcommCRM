@@ -116,6 +116,15 @@ export function isRdStationPayload(payload: unknown): payload is RdStationPayloa
 
 export interface RdStationMapped extends MappedLead {
   externalId: string | null;
+  /**
+   * O `conversion_identifier` da conversão (RD: qual formulário/evento
+   * converteu). É o sinal de "mesma DEMANDA" que a rota usa para decidir
+   * reconversão — mesmo contato + mesmo funil + mesmo identificador = a pessoa
+   * demonstrou interesse de novo no mesmo lugar, não um lead novo. `null`
+   * quando a conversão não trouxe identificador (a rota mantém o comportamento
+   * atual — um lead por conversão — nesse caso).
+   */
+  conversionIdentifier: string | null;
 }
 
 /**
@@ -147,13 +156,12 @@ export function mapRdStationPayload(payload: unknown): RdStationMapped {
   setCf("rd_lead_stage", str(lead.lead_stage));
   setCf("rd_public_url", str(lead.public_url));
   setCf("rd_number_conversions", str(lead.number_conversions));
-  setCf(
-    "rd_conversion_identifier",
+  const conversionIdentifier =
     str(last.conversion_identifier) ??
-      str(first.conversion_identifier) ??
-      str(last.identificador) ??
-      str(first.identificador),
-  );
+    str(first.conversion_identifier) ??
+    str(last.identificador) ??
+    str(first.identificador);
+  setCf("rd_conversion_identifier", conversionIdentifier);
   setCf("rd_conversion_url", str(last.conversion_url) ?? str(first.conversion_url));
   const evtUuid = cdpEventUuid(lead);
   setCf("rd_event_uuid", evtUuid);
@@ -172,5 +180,6 @@ export function mapRdStationPayload(payload: unknown): RdStationMapped {
     custom_fields,
     source_metadata: {},
     externalId,
+    conversionIdentifier,
   };
 }
