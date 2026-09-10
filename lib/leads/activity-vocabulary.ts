@@ -100,7 +100,40 @@ export type ActivityType =
   | "conversation_claimed"
   | "conversation_transferred"
   | "conversation_released"
-  | "conversation_ai_paused";
+  | "conversation_ai_paused"
+  /**
+   * O MESMO contato converteu de novo (webhook/formulário) no mesmo funil e
+   * mesmo `conversion_identifier`, e já havia um lead ABERTO. A rota NÃO cria
+   * card novo — registra a conversão aqui, no lead existente, preservando o
+   * `event_uuid` para idempotência. É acontecimento, não ruído: sem a linha,
+   * "a pessoa demonstrou interesse de novo" some, e quem atende não sabe que
+   * houve um segundo toque.
+   */
+  | "webhook_reconversion"
+  /**
+   * Reconversão quando o lead anterior daquela demanda estava GANHO. Aqui a
+   * regra é o oposto da de cima — cria-se uma demanda NOVA e aborda-se de novo,
+   * porque um cliente que já fechou e volta a se interessar é oportunidade
+   * nova. Esta linha entra no lead GANHO antigo, para o histórico dele não
+   * mentir que nada mais aconteceu.
+   */
+  | "webhook_reconversion_after_won"
+  /**
+   * Reconversão quando o lead anterior daquela demanda estava PERDIDO. Também
+   * gera card novo (a pessoa voltou), e esta linha marca o lead perdido antigo
+   * — sem ela, o card perdido fica parecendo esquecido, não retomado por
+   * iniciativa do próprio contato.
+   */
+  | "webhook_reconversion_after_lost"
+  /**
+   * Um dado do contato foi ENRIQUECIDO automaticamente na captação: nome que
+   * era identificador técnico ("34343", só dígitos) substituído por um nome
+   * plausível que chegou depois, ou e-mail antes vazio preenchido com um
+   * válido. Conservador por desenho — telefone nunca muda, e nome/e-mail já
+   * válidos nunca são sobrescritos. O `payload` carrega antes/depois e o
+   * `event_uuid` da conversão que trouxe o dado melhor.
+   */
+  | "contact_enriched";
 
 export const ACTIVITY_LABELS: Record<ActivityType, string> = {
   lead_created: "Entrou pelo WhatsApp",
@@ -190,6 +223,14 @@ export const ACTIVITY_LABELS: Record<ActivityType, string> = {
   // arquivos e o controle NEGATIVO de `handoff-por-orcamento.test.ts` usa
   // literalmente "Voltar para a IA" como a sabotagem que deve reprovar.
   conversation_ai_paused: "Pausou o automático",
+  // Rótulos com OBJETO (mesma régua do resto do arquivo): "Nova conversão
+  // registrada", não "Reconverteu". A reconversão sobre lead ganho/perdido
+  // nomeia o estado anterior porque é o que muda a leitura — a mesma linha num
+  // lead aberto e num lead ganho conta histórias diferentes.
+  webhook_reconversion: "Nova conversão registrada",
+  webhook_reconversion_after_won: "Reconversão após negócio ganho",
+  webhook_reconversion_after_lost: "Reconversão após negócio perdido",
+  contact_enriched: "Dados do contato enriquecidos",
 };
 
 /** Quando o tipo é legado/desconhecido, a linha ainda é honesta — sem jargão. */

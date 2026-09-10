@@ -175,6 +175,41 @@ describe("mapRdStationPayload — extração de identidade", () => {
   });
 });
 
+describe("mapRdStationPayload — conversionIdentifier (sinal de 'mesma demanda')", () => {
+  it("expõe o conversion_identifier da conversão, idêntico ao custom_field rd_conversion_identifier", () => {
+    const m = mapRdStationPayload(rdEnvelope());
+    expect(m.conversionIdentifier).toBe("jardim-bela-aurora");
+    expect(m.conversionIdentifier).toBe(m.custom_fields.rd_conversion_identifier);
+  });
+
+  it("cai para `identificador` quando `conversion_identifier` não vem", () => {
+    const env = rdEnvelope();
+    const lead = (env.leads as Record<string, unknown>[])[0];
+    for (const qual of ["first_conversion", "last_conversion"] as const) {
+      const c = (lead[qual] as { content: Record<string, unknown> }).content;
+      delete c.conversion_identifier;
+      c.identificador = "outro-empreendimento";
+    }
+    expect(mapRdStationPayload(env).conversionIdentifier).toBe("outro-empreendimento");
+  });
+
+  it("null quando a conversão não traz identificador nenhum (rota mantém 1 lead por conversão)", () => {
+    const env = rdEnvelope();
+    const lead = (env.leads as Record<string, unknown>[])[0];
+    for (const qual of ["first_conversion", "last_conversion"] as const) {
+      const c = (lead[qual] as { content: Record<string, unknown> }).content;
+      delete c.conversion_identifier;
+      delete c.identificador;
+    }
+    expect(mapRdStationPayload(env).conversionIdentifier).toBeNull();
+  });
+
+  it("null quando o envelope não tem conversões", () => {
+    const m = mapRdStationPayload(rdEnvelope({ withConversions: false }));
+    expect(m.conversionIdentifier).toBeNull();
+  });
+});
+
 describe("mapRdStationPayload — idempotência (externalId)", () => {
   it("usa rdstation:evt:<event_uuid> quando há event_uuid", () => {
     const m = mapRdStationPayload(rdEnvelope({ eventUuid: "abc1234a-0000-4000-8000-000000000000" }));

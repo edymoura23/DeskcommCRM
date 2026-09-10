@@ -15,8 +15,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logger } from "@/lib/logger";
 
-/** No que a captação deu. Espelha o CHECK de `webhook_lead_captures.outcome`. */
-export type DesfechoDaCaptacao = "criado" | "duplicado" | "recusado";
+/**
+ * No que a captação deu. Espelha o CHECK de `webhook_lead_captures.outcome`
+ * (migration 0203 acrescentou `reconversao`).
+ *
+ * - `criado`      — virou lead novo.
+ * - `duplicado`   — mesmo `external_id` já capturado antes (retry da ferramenta).
+ * - `recusado`    — não entrou (`rejectReason` diz por quê).
+ * - `reconversao` — o MESMO contato converteu de novo no mesmo funil/identificador
+ *   e já havia um lead ABERTO: nenhum card novo, a conversão virou atividade no
+ *   lead existente. Distinto de `duplicado` de propósito — retry de ferramenta e
+ *   pessoa convertendo outra vez são coisas diferentes para quem lê o histórico.
+ */
+export type DesfechoDaCaptacao = "criado" | "duplicado" | "recusado" | "reconversao";
 
 /**
  * Por que uma captação foi recusada. Vocabulário só do TypeScript — a coluna
