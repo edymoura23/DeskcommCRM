@@ -155,7 +155,7 @@ describe("mapRdStationPayload — extração de identidade", () => {
   it("name/email caem para os rótulos da conversão quando o topo não traz", () => {
     const env = rdEnvelope({ name: null, email: null });
     // repõe só na conversão
-    const lead = (env.leads as Record<string, unknown>[])[0];
+    const lead = (env.leads as Record<string, unknown>[])[0]!;
     (lead.last_conversion as { content: Record<string, unknown> }).content.Nome = "Nome Da Conversao";
     (lead.last_conversion as { content: Record<string, unknown> }).content.email_lead = "conv@example.com";
     const m = mapRdStationPayload(env);
@@ -184,7 +184,7 @@ describe("mapRdStationPayload — conversionIdentifier (sinal de 'mesma demanda'
 
   it("cai para `identificador` quando `conversion_identifier` não vem", () => {
     const env = rdEnvelope();
-    const lead = (env.leads as Record<string, unknown>[])[0];
+    const lead = (env.leads as Record<string, unknown>[])[0]!;
     for (const qual of ["first_conversion", "last_conversion"] as const) {
       const c = (lead[qual] as { content: Record<string, unknown> }).content;
       delete c.conversion_identifier;
@@ -195,7 +195,7 @@ describe("mapRdStationPayload — conversionIdentifier (sinal de 'mesma demanda'
 
   it("null quando a conversão não traz identificador nenhum (rota mantém 1 lead por conversão)", () => {
     const env = rdEnvelope();
-    const lead = (env.leads as Record<string, unknown>[])[0];
+    const lead = (env.leads as Record<string, unknown>[])[0]!;
     for (const qual of ["first_conversion", "last_conversion"] as const) {
       const c = (lead[qual] as { content: Record<string, unknown> }).content;
       delete c.conversion_identifier;

@@ -597,8 +597,14 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
   // retry — a checagem própria abaixo (atividade já registrada com este
   // event_uuid) faz esse papel. No caminho FECHADO o lead novo nasce com o
   // `external_id`, e aí o fast-path normal já cobre o retry.
+  //
+  // Prefere o UUID PURO (`rd_event_uuid`) — o campo do payload se chama
+  // `event_uuid`, não deve carregar a forma prefixada `rdstation:evt:<uuid>`.
+  // Cai para `externalId` (`rdstation:lead:<id>`) só quando a conversão não
+  // trouxe event_uuid. O dedup abaixo compara contra o MESMO valor gravado,
+  // então a idempotência segue consistente qualquer que seja o ramo.
   const eventoDaReconversao =
-    externalId ?? ((mapped.custom_fields.rd_event_uuid as string | undefined) ?? null);
+    (mapped.custom_fields.rd_event_uuid as string | undefined) ?? externalId ?? null;
   let reconversaoDeFechado: "won" | "lost" | null = null;
   let leadFechadoParaMarcar: string | null = null;
   if (conversionIdentifier && contactId) {

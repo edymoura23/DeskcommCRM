@@ -1233,7 +1233,15 @@ describe("POST /api/v1/webhooks/in/[token] — RD Station (envelope leads[])", (
   });
 
   it("rd 2 — MESMO event_uuid reenviado NÃO duplica: 200 com o lead existente", async () => {
-    const payload = rdStationEnvelope({ eventUuid: "aaaa0002-0000-4000-8000-000000000002", leadId: "5035999002" });
+    // contato próprio (telefone + e-mail distintos): sem isso, o e-mail default
+    // colapsaria neste contato o da rd 1, cujo lead ABERTO com o mesmo
+    // conversion_identifier faria o guard de reconversão absorver este POST.
+    const payload = rdStationEnvelope({
+      eventUuid: "aaaa0002-0000-4000-8000-000000000002",
+      leadId: "5035999002",
+      mobilePhone: "+55 (11) 98888-0002",
+      email: "maria.rd2@example.com",
+    });
     const first = await POST(jsonReq(TOKEN_RDSTATION, payload), reqCtx(TOKEN_RDSTATION));
     const firstId = ((await first.json()) as { data: { lead_id: string } }).data.lead_id;
 
@@ -1249,7 +1257,13 @@ describe("POST /api/v1/webhooks/in/[token] — RD Station (envelope leads[])", (
   });
 
   it("rd 3 — sem event_uuid: usa rdstation:lead:<id> como chave de idempotência", async () => {
-    const payload = rdStationEnvelope({ eventUuid: null, leadId: "5035999003" });
+    // contato próprio, pelo mesmo motivo da rd 2.
+    const payload = rdStationEnvelope({
+      eventUuid: null,
+      leadId: "5035999003",
+      mobilePhone: "+55 (11) 98888-0003",
+      email: "maria.rd3@example.com",
+    });
     const res = await POST(jsonReq(TOKEN_RDSTATION, payload), reqCtx(TOKEN_RDSTATION));
     expect(res.status).toBe(200);
     const leadId = ((await res.json()) as { data: { lead_id: string } }).data.lead_id;
@@ -1349,12 +1363,18 @@ function recon(over: {
   email?: string | null;
   convId?: string | null;
 }) {
+  const phone = over.phone ?? "+55 (32) 90000-1000";
   return rdStationEnvelope({
     eventUuid: over.ev,
     leadId: over.leadId,
-    mobilePhone: over.phone ?? "+55 (32) 90000-1000",
+    mobilePhone: phone,
     name: over.name === undefined ? "Contato Recon" : over.name,
-    email: over.email === undefined ? "recon.base@example.com" : over.email,
+    // E-mail DERIVADO do telefone do cenário: constante dentro do teste (as
+    // duas conversões usam o mesmo telefone) e DISTINTO entre testes. Um
+    // e-mail fixo compartilhado colapsaria todos os contatos rc num só via
+    // uniq_contacts_org_email (o tratador de corrida da rota resolve por
+    // e-mail), contaminando as contagens de lead/atividade entre cenários.
+    email: over.email === undefined ? `recon-${phone.replace(/\D/g, "")}@example.com` : over.email,
     conversionIdentifier: over.convId === undefined ? "jardim-bela-aurora" : over.convId,
   });
 }
