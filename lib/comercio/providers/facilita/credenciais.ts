@@ -1,7 +1,7 @@
 /**
  * Credenciais do Facilita — por organização, cifradas.
  *
- * Mesmo desenho de `lib/channels/zernio/credentials.ts`: busca por
+ * Mesmo desenho já usado por credenciais de canal externo em `lib/channels/`: busca por
  * `organization_id` (nunca de input do chamador), decifra com a MESMA cifra
  * do resto do repo (`fn_encrypt_oauth`/`fn_decrypt_oauth`, via
  * `lib/webhooks/secrets.ts`), `null` = "esta org não tem fonte comercial
@@ -14,9 +14,9 @@
  * decrypt por leitura.
  *
  * Erro de CONSULTA (não de ausência) é lançado, nunca engolido — descartar o
- * `error` foi a metade do defeito da issue #236 (zernio): um erro descartado
- * pode virar silenciosamente "não configurada" quando na verdade a consulta
- * falhou por outro motivo.
+ * `error` foi a metade do defeito da issue #236 (mesma lição aplicada a um
+ * canal de mensagem): um erro descartado pode virar silenciosamente "não
+ * configurada" quando na verdade a consulta falhou por outro motivo.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 

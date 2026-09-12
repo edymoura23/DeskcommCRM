@@ -3,7 +3,7 @@
  * disponibilidade (products/show, availability, salestable + paginação
  * real). Host FIXO, nunca de input do modelo/lead — mesma classe de
  * confiança dos demais clientes de provider externo do repo
- * (`lib/channels/adapters/zernio.ts`), que também chamam `fetch()` direto
+ * em `lib/channels/adapters/`, que também chamam `fetch()` direto
  * sem passar pela allowlist de egress do runtime edge (essa allowlist é
  * escopada a chamadas que partem do runtime do agente/LLM, não a um cliente
  * de host fixo chamado de dentro do handler de uma tool).
