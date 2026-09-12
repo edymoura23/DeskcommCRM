@@ -33,7 +33,6 @@ import { filtrarTabelasVigentes, type TabelaFacilitaBruta } from "./providers/fa
 import { precoDeReferencia } from "./providers/facilita/preco-de-referencia";
 import { situacaoSegura } from "./providers/facilita/situacao-segura";
 import { extrairEntradaEParcelas } from "./providers/facilita/fluxo-de-pagamento";
-import type { FacilitaCredenciais } from "./providers/facilita/credenciais";
 
 async function paraCondicaoComercial(
   creds: FacilitaCredenciais,
