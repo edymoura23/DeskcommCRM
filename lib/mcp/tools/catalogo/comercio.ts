@@ -37,4 +37,24 @@ export const TOOLS_COMERCIO = declararTools([
     risco: "seguro",
     pacotes: ["organizar", "atender"],
   },
+  {
+    name: "crm_consultar_condicoes_comerciais",
+    category: "read",
+    rotulo: "Consultar condições comerciais vigentes",
+    explicacao:
+      "Busca as condições de pagamento e o preço de referência vigentes agora, para o assistente responder preço e condição com dado real em vez de estimar ou repetir uma tabela antiga.",
+    oQueToca: "Condições comerciais e preço",
+    risco: "seguro",
+    pacotes: ["vender"],
+  },
+  {
+    name: "crm_consultar_disponibilidade_lote",
+    category: "read",
+    rotulo: "Consultar disponibilidade de lote",
+    explicacao:
+      "Verifica se um lote, ou uma quadra inteira, está disponível agora, para o assistente não prometer algo que já foi vendido ou reservado.",
+    oQueToca: "Disponibilidade de lotes",
+    risco: "seguro",
+    pacotes: ["vender"],
+  },
 ]);

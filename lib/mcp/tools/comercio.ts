@@ -12,6 +12,7 @@
 import { z } from "zod";
 
 import type { McpToolDefinition } from "../types";
+import { resolverFonteComercial } from "@/lib/comercio/resolver-fonte-comercial";
 
 // ---------------------------------------------------------------------------
 // pedidos de um cliente
@@ -97,5 +98,78 @@ export const crmSearchProducts: McpToolDefinition<typeof produtosInputShape> = {
         ? { aviso: input.somente_disponiveis ? "nada com esse nome em estoque" : "nada com esse nome no catálogo" }
         : {}),
     };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// condições comerciais e disponibilidade (preço/condição/lote) — transversal:
+// nenhuma menção a JBA/AURORA/WhatsApp/Facilita aqui. `resolverFonteComercial`
+// é quem sabe qual provider concreto atende esta organização.
+// ---------------------------------------------------------------------------
+
+const condicoesInputShape = {
+  quadra: z.string().trim().min(1).optional().describe("Quadra do lote, se o cliente já tiver informado."),
+  lote: z.string().trim().min(1).optional().describe("Número do lote, se o cliente já tiver informado."),
+};
+
+export const crmConsultarCondicoesComerciais: McpToolDefinition<typeof condicoesInputShape> = {
+  name: "crm_consultar_condicoes_comerciais",
+  description:
+    "Consulta as condições comerciais vigentes agora (tabelas de pagamento, desconto) e, se quadra e lote " +
+    "forem informados, o preço de referência do lote. Use antes de responder preço ou condição — nunca " +
+    "estime, nunca repita um valor de memória ou de conversa anterior.",
+  inputSchema: condicoesInputShape,
+  category: "read",
+  requiresRole: "agent",
+  requiresScope: "mcp:read",
+  handler: async (input, ctx) => {
+    const provider = await resolverFonteComercial(ctx.supabase, ctx.organizationId);
+    if (!provider) {
+      return { aviso: "esta organização não tem fonte de dados comercial configurada" };
+    }
+
+    const condicoes = await provider.condicoesVigentes();
+    if (!input.quadra || !input.lote) {
+      return { condicoes };
+    }
+
+    const unidade = await provider.unidade(input.quadra, input.lote);
+    if (!unidade) {
+      return { condicoes, aviso: "lote não encontrado ou fora de estoque" };
+    }
+    return { condicoes, unidade };
+  },
+};
+
+const disponibilidadeInputShape = {
+  quadra: z.string().trim().min(1).describe("Quadra a consultar."),
+  lote: z.string().trim().min(1).optional().describe("Número do lote, para a situação de uma unidade específica."),
+};
+
+export const crmConsultarDisponibilidadeLote: McpToolDefinition<typeof disponibilidadeInputShape> = {
+  name: "crm_consultar_disponibilidade_lote",
+  description:
+    "Consulta a disponibilidade real de lotes numa quadra (contagem), ou a situação de um lote específico " +
+    "quando quadra e lote forem informados. Use antes de dizer que um lote está disponível — a situação muda " +
+    "por venda ou reserva a qualquer momento.",
+  inputSchema: disponibilidadeInputShape,
+  category: "read",
+  requiresRole: "agent",
+  requiresScope: "mcp:read",
+  handler: async (input, ctx) => {
+    const provider = await resolverFonteComercial(ctx.supabase, ctx.organizationId);
+    if (!provider) {
+      return { aviso: "esta organização não tem fonte de dados comercial configurada" };
+    }
+
+    if (input.lote) {
+      const unidade = await provider.unidade(input.quadra, input.lote);
+      if (!unidade) {
+        return { aviso: "lote não encontrado ou fora de estoque" };
+      }
+      return { quadra: unidade.quadra, lote: unidade.lote, situacao: unidade.situacao };
+    }
+
+    return provider.disponibilidadePorQuadra(input.quadra);
   },
 };
