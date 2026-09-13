@@ -32,6 +32,13 @@ import type { FlowGraph } from "@/lib/followup/graph-schema";
  * contato, não a 1ª conversa velha encontrada; contato cuja única conversa
  * nunca recebeu inbound (`last_inbound_at is null`) também NÃO enrolla —
  * "nunca conversou" ≠ "está em silêncio", sem mass-enroll de contato novo.
+ * (6) GUARDA DE EPISÓDIO NOVO (laço JBA/Corteux 2026-09-08): um contato que já
+ * teve enrollment terminal (`completed`/`cancelled`/`dead`) NESTE pointer só
+ * volta à fila se houver inbound REAL dele POSTERIOR ao fim daquele enrollment
+ * (`coalesce(completed_at, updated_at)`); 1ª inscrição (sem terminal) segue
+ * livre; a escrita continua serializada por `idx_followup_enrollments_one_live`.
+ * Só o gatilho de SILÊNCIO — `stage_change`/`case_opened` são event-driven e
+ * não têm auto-laço.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -104,7 +111,23 @@ function silenceSweepDb(): SilenceSweepDb {
         .filter((r) => !r.is_blocked)
         .filter((r) => new Date(r.last_inbound_at).getTime() <= cutoff)
         .filter((r) => segments.length === 0 || segments.some((s) => r.tags.includes(s)))
-        .map((r) => r.contact_id);
+        .map((r) => ({ contactId: r.contact_id, lastInboundAtMs: new Date(r.last_inbound_at).getTime() }));
+    },
+    async loadLastTerminalEnrollmentEndByContact(pointerId, contactIds) {
+      const out = new Map<string, number>();
+      if (contactIds.length === 0) return out;
+      const { rows } = await pool.query<{ contact_id: string; end_at: string }>(
+        `select contact_id, max(coalesce(completed_at, updated_at)) as end_at
+         from followup_enrollments
+         where pointer_id = $1 and contact_id = any($2::uuid[])
+           and status in ('completed','cancelled','dead')
+         group by contact_id`,
+        [pointerId, contactIds],
+      );
+      for (const r of rows) {
+        if (r.end_at) out.set(r.contact_id, new Date(r.end_at).getTime());
+      }
+      return out;
     },
     async loadTriggerNodeId(orgId, versionId) {
       const { rows } = await pool.query<{ graph: FlowGraph }>(
@@ -704,5 +727,155 @@ describe("dedup 0062 — >1 enrollment vivo pro mesmo (org,contact) vira 1 vivo 
       await pool.query(`delete from followup_enrollments where contact_id = $1`, [contactId]);
       await setOneLiveIndex("organization_id, contact_id");
     }
+  });
+});
+
+// ---- 9. guarda de EPISÓDIO NOVO de silêncio (laço JBA/Corteux 2026-09-08) ----
+//
+// runSilenceSweep só re-inscreve um contato que JÁ teve enrollment terminal
+// NESTE pointer se houver inbound REAL dele POSTERIOR ao fim daquele enrollment.
+// 1ª inscrição (sem terminal) segue livre. A ESCRITA continua serializada pelo
+// índice idx_followup_enrollments_one_live — a guarda só decide QUEM entra.
+
+/** Insere um enrollment já TERMINAL neste pointer, terminado há `endMinutesAgo`. */
+async function seedTerminalEnrollment(
+  org: string,
+  pointerId: string,
+  versionId: string,
+  contactId: string,
+  opts: { status: "completed" | "cancelled" | "dead"; endMinutesAgo: number; outcome?: string },
+): Promise<void> {
+  const endCol = opts.status === "completed" ? "completed_at" : "updated_at";
+  await pool.query(
+    `insert into followup_enrollments
+       (organization_id, pointer_id, version_id, contact_id, current_node_id, status, outcome,
+        next_eval_at, started_at, ${endCol})
+     values ($1,$2,$3,$4,'t1',$5,$6, null,
+             now() - interval '${opts.endMinutesAgo + 60} minutes',
+             now() - interval '${opts.endMinutesAgo} minutes')`,
+    [org, pointerId, versionId, contactId, opts.status, opts.outcome ?? null],
+  );
+}
+
+describe("runSilenceSweep — re-entrada só num episódio NOVO de silêncio", () => {
+  it("N1 regressão — 1ª inscrição: contato silencioso SEM enrollment terminal no pointer → enrolla", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId } = await seedSilenceFlow(org, { thresholdMinutes: 60 });
+    await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 120);
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.enrolled).toBe(1);
+    expect(summary.skipped_no_new_inbound).toBe(0);
+    expect(await countEnrollments(pointerId, contactId)).toBe(1);
+  });
+
+  it("N2 fix — terminal 'completed' e SEM inbound novo desde o fim → NÃO enrolla", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes: 60 });
+    await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    // último inbound há 200min; a sequência anterior fechou há 90min (DEPOIS do inbound).
+    await seedConversation(org, contactId, 200);
+    await seedTerminalEnrollment(org, pointerId, versionId, contactId, {
+      status: "completed",
+      endMinutesAgo: 90,
+      outcome: "exhausted",
+    });
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.enrolled).toBe(0);
+    expect(summary.skipped_no_new_inbound).toBeGreaterThanOrEqual(1);
+    expect(await countEnrollments(pointerId, contactId)).toBe(1); // só o terminal antigo
+  });
+
+  it("N3 — reply DEPOIS do fim + novo silêncio > threshold → enrolla (episódio novo)", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes: 60 });
+    await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    // a sequência anterior fechou há 200min; o contato voltou a falar há 90min
+    // (DEPOIS do fim) e está em silêncio de novo (90 > 60).
+    await seedConversation(org, contactId, 90);
+    await seedTerminalEnrollment(org, pointerId, versionId, contactId, {
+      status: "completed",
+      endMinutesAgo: 200,
+      outcome: "exhausted",
+    });
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.enrolled).toBe(1);
+    expect(summary.skipped_no_new_inbound).toBe(0);
+    expect(await countEnrollments(pointerId, contactId)).toBe(2); // terminal antigo + novo
+  });
+
+  it("N4 — terminal 'cancelled' também barra quando não houve inbound novo", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes: 60 });
+    await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 200);
+    await seedTerminalEnrollment(org, pointerId, versionId, contactId, {
+      status: "cancelled",
+      endMinutesAgo: 90,
+    });
+
+    const summary = await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(summary.enrolled).toBe(0);
+    expect(summary.skipped_no_new_inbound).toBeGreaterThanOrEqual(1);
+  });
+
+  it("N5 concorrência — 2 varreduras seguidas de um contato elegível → 1 enrollment vivo (índice one-live)", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const { pointerId, versionId } = await seedSilenceFlow(org, { thresholdMinutes: 60 });
+    await seedPublishedAgentVersion(org, { enabled: true, pointerIds: [pointerId] });
+    const contactId = await seedContact(org);
+    await seedConversation(org, contactId, 90);
+    await seedTerminalEnrollment(org, pointerId, versionId, contactId, {
+      status: "completed",
+      endMinutesAgo: 200,
+      outcome: "exhausted",
+    });
+
+    const deps = { db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK };
+    const s1 = await runSilenceSweep(deps);
+    const s2 = await runSilenceSweep(deps);
+    expect(s1.enrolled).toBe(1);
+    expect(s2.enrolled).toBe(0);
+    expect(s2.skipped_existing).toBeGreaterThanOrEqual(1); // 2º insert barrado por 23505 org-wide
+    expect(await countLiveForContact(org, contactId)).toBe(1);
+  });
+
+  it("N6 cross-org — terminal de um contato na org A não influencia a decisão da org B", async () => {
+    const orgA = nextOrgId();
+    const orgB = nextOrgId();
+    await seedOrg(orgA);
+    await seedOrg(orgB);
+    const flowA = await seedSilenceFlow(orgA, { thresholdMinutes: 60 });
+    const flowB = await seedSilenceFlow(orgB, { thresholdMinutes: 60 });
+    await seedPublishedAgentVersion(orgA, { enabled: true, pointerIds: [flowA.pointerId] });
+    await seedPublishedAgentVersion(orgB, { enabled: true, pointerIds: [flowB.pointerId] });
+
+    // org A: contato barrado (terminal fechou DEPOIS do último inbound)
+    const contactA = await seedContact(orgA);
+    await seedConversation(orgA, contactA, 200);
+    await seedTerminalEnrollment(orgA, flowA.pointerId, flowA.versionId, contactA, {
+      status: "completed",
+      endMinutesAgo: 90,
+      outcome: "exhausted",
+    });
+    // org B: contato limpo, silencioso, sem terminal
+    const contactB = await seedContact(orgB);
+    await seedConversation(orgB, contactB, 120);
+
+    await runSilenceSweep({ db: silenceSweepDb(), gateDb: pgGateDb(), clock: CLOCK });
+    expect(await countEnrollments(flowA.pointerId, contactA)).toBe(1); // só o terminal — A segue barrado
+    expect(await countEnrollments(flowB.pointerId, contactB)).toBe(1); // B enrolla normalmente
   });
 });
