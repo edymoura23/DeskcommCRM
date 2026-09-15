@@ -76,6 +76,14 @@ export interface AvisoDeEscalacaoOpts {
   agentId?: string | null;
   disclosureMode?: 'inject' | 'veto';
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * O aviso é consequência DIRETA de um turno REATIVO (o cliente pediu humano ou
+   * sinalizou opt-out num `inbound_turn`, ou um `case_reply_turn`)? `true` faz o
+   * gate `pacing` da cadeia pular a janela de horário/domingo — mantendo warm-up,
+   * cap diário e throttle. O chamador (`inbound-turn.ts`) só passa `true` quando
+   * a origem é de fato reativa; ausente = comportamento atual (janela vale).
+   */
+  reactiveInbound?: boolean;
 }
 
 /**
@@ -118,6 +126,9 @@ export async function avisarLeadDaEscalacao(
       // Mesmo débito declarado no caminho do agente e no da re-entrada: o
       // daily_message_limit do CRM ainda não é lido no runtime.
       crmDailyLimit: null,
+      // Origem reativa (cliente pediu humano / opt-out num inbound, ou case_reply):
+      // o gate `pacing` pula SÓ a janela de horário/domingo — warm-up/cap/throttle seguem.
+      ...(opts.reactiveInbound === true ? { reactiveInbound: true } : {}),
       now: opts.now,
       ...(opts.sleep !== undefined ? { sleep: opts.sleep } : {}),
       ...(opts.lgpd !== undefined ? { lgpd: opts.lgpd } : {}),

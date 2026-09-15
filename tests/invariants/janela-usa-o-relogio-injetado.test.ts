@@ -7,56 +7,55 @@ import type * as Queue from "@/lib/agent-engine/queue/queue";
 import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
 
 /**
- * A JANELA DE HORÁRIO É DECIDIDA PELO RELÓGIO INJETADO — nunca pelo de parede.
+ * A JANELA DE HORÁRIO É DECIDIDA PELO RELÓGIO INJETADO — nunca pelo de parede —
+ * E SÓ ADIA O QUE É PROATIVO. Resposta ao cliente é 24/7.
  *
- * ─── O defeito que este arquivo existe para impedir ─────────────────────────
+ * ─── MUDANÇA DELIBERADA DE PRODUTO (2026-09-08) ────────────────────────────
  *
- * `InboundTurnDeps.clock` documenta o próprio uso: "a janela horária do gate
- * anti-ban é avaliada nele. Default `() => new Date()`; os testes fixam um
- * instante dentro da janela para determinismo."
+ * "Mudança deliberada de produto: mensagens REATIVAS originadas por interação
+ *  do cliente devem ser atendidas 24/7. A janela 07h–22h/domingo é regra de
+ *  cortesia/antiabuso para comunicação PROATIVA, não para resposta ao cliente."
  *
- * O gate lia `new Date()` direto, contra esse contrato. O efeito não era um
- * teste frouxo: era um CHECK OBRIGATÓRIO (`invariants`) que dependia da hora
- * em que alguém abrisse o PR — reprovava entre 22h e 7h, passava no resto do
- * dia. Medido em 2026-08-24, mesmo commit, mesma máquina, com o conserto no
- * meio: 22:48 BRT sem o conserto → 3 casos de
- * `limite-de-envios-por-turno.test.ts` reprovados; 22:50 BRT com ele → verdes.
- * As sete rodadas verdes da `main` naquele dia caíram todas entre 09:58 e
- * 15:14 BRT: o defeito viveu escondido no horário comercial de quem trabalha
- * neste repo.
+ * Este arquivo é `tests/invariants/**` (CONGELADO — `loop/hooks/freeze-invariants.sh`).
+ * A edição foi autorizada pela governança: `DESKCOMM_GOV_INVARIANTS_EDIT=1` no
+ * commit + a justificativa acima citada na mensagem. NÃO é enfraquecimento — a
+ * proteção continua inteira, agora expressando a regra certa: o PROATIVO
+ * (`followup_turn` com envio) segue sendo ADIADO fora da janela; o REATIVO
+ * (`inbound_turn`, `case_reply_turn`) NUNCA é adiado.
  *
- * ─── Por que um arquivo NOVO, e não mais casos no arquivo vizinho ───────────
+ * ─── O defeito ORIGINAL que este arquivo impede (segue valendo p/ o proativo) ─
  *
- * `tests/invariants/**` é congelado (`loop/hooks/freeze-invariants.sh`):
- * acrescentar arquivo é permitido, modificar um existente é bloqueado. A regra
- * está certa e é ela que impede o movimento "invariante incômodo → editar
- * invariante". Acrescentar é o caminho sancionado — e aqui ele também é a
- * separação certa: o vizinho mede o TETO DE ENVIOS por turno e fixa o relógio
- * só para o horário não atrapalhar; este mede o HORÁRIO em si.
+ * `InboundTurnDeps.clock` (ou `FollowupTurnDeps.clock`) decide a janela. O gate
+ * lia `new Date()` direto: um CHECK OBRIGATÓRIO (`invariants`) que dependia da
+ * hora do PR — reprovava 22h–7h, passava no resto (medido 2026-08-24). Os casos
+ * "FORA→…" abaixo injetam um instante FORA e reprovam DE DIA se o relógio de
+ * parede voltar.
  *
- * ─── Por que DOIS casos, e não só o que pegaria o defeito ───────────────────
+ * ─── O bug ESTRUTURAL que a mudança conserta (medido no E2E do JBA, 2026-09-08) ─
  *
- * Os casos do vizinho injetam um instante DENTRO da janela. Com o defeito de
- * volta, eles só reprovam À NOITE — uma guarda que dorme das 7h às 22h, que é
- * justamente quando o time trabalha. O primeiro caso daqui é o espelho: injeta
- * um instante FORA e exige o adiamento, então reprova DE DIA. Medido,
- * sabotando o conserto nas duas condições:
+ * A guarda de janela em `executarTurnoDoAgente` usava `turnoVaiFalarComOLead`
+ * (que inclui `inbound_turn`) e adiava o turno REATIVO inteiro. Um cliente que
+ * escrevia 01h30 BRT só recebia resposta às 07h — sem LLM, sem RAG, sem nada.
+ * Antes disso já existia o "turno ok sem mensagem" (2026-08-18): o veto de
+ * janela virava erro-de-ensino no `send_message` e o turno terminava `ok` com
+ * ZERO outbound. A guarda passou a usar `turnoAdiaPorJanela` (só o proativo), e
+ * o gate `pacing` ganhou `reactiveInbound` (pula SÓ janela+domingo; warm-up /
+ * cap diário / throttle seguem). O caso "inbound_turn FORA → CORRE e envia
+ * EXATAMENTE 1" abaixo é a regressão dos DOIS defeitos: nem adiamento indevido,
+ * nem "turno ok sem mensagem".
  *
- *                      vizinho (3)   "fora→adia" (aqui)  "dentro→corre" (aqui)
- *   defeito à noite      PEGAM       passa (motivo         PEGA
- *                                     errado)
- *   defeito de dia       passam       PEGA                 passa
- *                        (motivo
- *                         errado)
+ * ─── Cobertura ────────────────────────────────────────────────────────────────
  *
- * De dia, o primeiro caso daqui é a ÚNICA coisa entre o defeito e um CI verde.
- * O segundo existe pela razão oposta: um gate que adiasse SEMPRE também
- * satisfaria o primeiro, e "adia sempre" é outro jeito de o produto emudecer.
+ *   inbound_turn    FORA da janela → CORRE, exatamente 1 outbound
+ *   case_reply_turn FORA da janela → CORRE / responde (também reativo)
+ *   followup_turn   FORA da janela → CONTINUA ADIADO (JobSettledError, 0 outbound)
+ *   inbound_turn    DENTRO         → CORRE (comportamento dentro da janela intacto)
+ *   followup_turn   DENTRO         → CORRE (proativo dentro da janela funciona)
  *
- * Harness igual ao do vizinho: handler real, modelo fake, canal que CAPTURA em
- * vez de enviar, `sleep` no-op. Os ids são PRÓPRIOS: o `setupFile` recria o
- * banco por arquivo, mas ids distintos deixam o log legível quando os dois
- * arquivos aparecem na mesma corrida.
+ * Harness: handlers REAIS (`createInboundTurnHandler` / `createFollowupTurnHandler`
+ * / `createCaseReplyTurnHandler`), modelo fake, canal que CAPTURA em vez de
+ * enviar, `sleep` no-op, relógio injetado. Ids próprios (o `setupFile` recria o
+ * banco por arquivo).
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -80,6 +79,7 @@ const SESSION = "dddddddd-0000-4000-8000-0000000000a3";
 const CONV = "dddddddd-0000-4000-8000-0000000000a4";
 const MSG = "dddddddd-0000-4000-8000-0000000000a5";
 const CRM_EVENT = "dddddddd-0000-4000-8000-0000000000a6";
+const CASO = "dddddddd-0000-4000-8000-0000000000a7";
 
 /** Terça, 15h BRT — dentro da janela anti-ban padrão (7h–22h). */
 const DENTRO_DA_JANELA = new Date("2026-07-28T18:00:00Z");
@@ -92,11 +92,15 @@ interface EnvioCapturado {
 
 type Modules = {
   createInboundTurnHandler: typeof InboundTurn.createInboundTurnHandler;
+  createFollowupTurnHandler: typeof import("@/lib/agent-engine/agent/followup-turn").createFollowupTurnHandler;
+  createCaseReplyTurnHandler: typeof import("@/lib/agent-engine/agent/case-reply-turn").createCaseReplyTurnHandler;
   queue: typeof Queue;
   createLogger: typeof ObsLogger.createLogger;
   createFakeRegistry: typeof Providers.createFakeRegistry;
 };
 let m: Modules;
+
+type TurnKind = "inbound_turn" | "followup_turn" | "case_reply_turn";
 
 let enviados: EnvioCapturado[] = [];
 
@@ -146,8 +150,9 @@ function modeloQueManda(rotulo: string) {
   };
 }
 
-function montaHandler(doGenerate: unknown, instante: Date) {
-  return m.createInboundTurnHandler({
+/** Deps compartilhadas pelos 3 handlers (FollowupTurnDeps ⊇ InboundTurnDeps). */
+function montaDeps(doGenerate: unknown, instante: Date) {
+  return {
     crmCfg: { supabase: {} as never },
     llmCfg: { anthropicApiKey: "fake" } as never,
     knobs: {
@@ -186,21 +191,37 @@ function montaHandler(doGenerate: unknown, instante: Date) {
     // que a suíte por acaso rodou.
     clock: () => instante,
     sleep: async () => {},
-  });
+  };
 }
 
-async function rodaTurno(handler: ReturnType<typeof montaHandler>): Promise<Error | null> {
+function montaHandler(kind: TurnKind, doGenerate: unknown, instante: Date) {
+  const deps = montaDeps(doGenerate, instante) as never;
+  if (kind === "followup_turn") return m.createFollowupTurnHandler(deps);
+  if (kind === "case_reply_turn") return m.createCaseReplyTurnHandler(deps);
+  return m.createInboundTurnHandler(deps);
+}
+
+async function rodaTurno(
+  kind: TurnKind,
+  handler: ReturnType<typeof montaHandler>,
+): Promise<Error | null> {
   await pool.query("update job_queue set status = 'done' where status = 'pending'");
+  const payload =
+    kind === "case_reply_turn"
+      ? { case_id: CASO, action: "need_lead_info", body: "qual o CEP do lote?" }
+      : kind === "followup_turn"
+        ? { channel_session_id: SESSION }
+        : {
+            conversation_id: CONV,
+            contact_id: CONTACT,
+            channel_session_id: SESSION,
+            inbound_message_id: MSG,
+            crm_event_id: CRM_EVENT,
+          };
   const { job } = await m.queue.enqueueJob(pool, ORG, {
-    kind: "inbound_turn",
+    kind,
     leadId: CONTACT,
-    payload: {
-      conversation_id: CONV,
-      contact_id: CONTACT,
-      channel_session_id: SESSION,
-      inbound_message_id: MSG,
-      crm_event_id: CRM_EVENT,
-    },
+    payload,
     maxAttempts: 1,
   });
   const [claimed] = await m.queue.claimJobs(pool, { workerId: "janela", maxConcurrency: 1 });
@@ -219,6 +240,10 @@ beforeAll(async () => {
   m = {
     createInboundTurnHandler: (await import("@/lib/agent-engine/agent/inbound-turn"))
       .createInboundTurnHandler,
+    createFollowupTurnHandler: (await import("@/lib/agent-engine/agent/followup-turn"))
+      .createFollowupTurnHandler,
+    createCaseReplyTurnHandler: (await import("@/lib/agent-engine/agent/case-reply-turn"))
+      .createCaseReplyTurnHandler,
     queue: await import("@/lib/agent-engine/queue/queue"),
     createLogger: (await import("@/lib/agent-engine/obs/logger")).createLogger,
     createFakeRegistry: (await import("@/lib/agent-engine/edge/llm/providers")).createFakeRegistry,
@@ -260,25 +285,74 @@ beforeAll(async () => {
      insert into playbook_pointers (organization_id, layer, version_id)
      select null, 'platform', id from v`,
   );
+  // Caso aberto p/ o `case_reply_turn` — status pós-transição da rota humana
+  // (`need_lead_info` → `awaiting_lead`, ver EXPECTED_STATUS_FOR_ACTION). agent_id
+  // fica NULL (FK ON DELETE SET NULL); title/summary/blocker são NOT NULL sem default.
+  await pool.query(
+    `insert into agent_cases (id, organization_id, conversation_id, agent_id, status, title, summary, blocker, source)
+     values ($1,$2,$3,null,'awaiting_lead','Caso da janela','—','—','agent')
+     on conflict (id) do nothing`,
+    [CASO, ORG, CONV],
+  );
 });
 
 beforeEach(() => {
   enviados = [];
 });
 
-describe("a janela de horário é decidida pelo relógio injetado", () => {
-  it("relógio FORA da janela: o turno é adiado, não importa a hora real", async () => {
-    const erro = await rodaTurno(montaHandler(modeloQueManda("noturno"), FORA_DA_JANELA));
+describe("a janela de horário é decidida pelo relógio injetado — e só adia o PROATIVO", () => {
+  it("inbound_turn FORA da janela: CORRE e envia EXATAMENTE 1 (nem adia, nem 'turno ok sem mensagem')", async () => {
+    const erro = await rodaTurno(
+      "inbound_turn",
+      montaHandler("inbound_turn", modeloQueManda("reativo-noturno"), FORA_DA_JANELA),
+    );
+
+    // Resposta REATIVA ao cliente é 24/7. NÃO pode adiar (sem JobSettledError de
+    // janela) E NÃO pode terminar `ok` com zero outbound (o bug de 2026-08-18).
+    expect(erro).toBeNull();
+    expect(String(erro?.message ?? "")).not.toMatch(/fora da janela anti-ban/);
+    expect(enviados).toHaveLength(1);
+  });
+
+  it("case_reply_turn FORA da janela: CORRE / responde (também é reativo — humano agiu num caso)", async () => {
+    const erro = await rodaTurno(
+      "case_reply_turn",
+      montaHandler("case_reply_turn", modeloQueManda("reativo-caso-noturno"), FORA_DA_JANELA),
+    );
+
+    expect(erro).toBeNull();
+    expect(String(erro?.message ?? "")).not.toMatch(/fora da janela anti-ban/);
+    expect(enviados).toHaveLength(1);
+  });
+
+  it("followup_turn FORA da janela: CONTINUA ADIADO (proativo respeita a cortesia)", async () => {
+    const erro = await rodaTurno(
+      "followup_turn",
+      montaHandler("followup_turn", modeloQueManda("proativo-noturno"), FORA_DA_JANELA),
+    );
 
     // Adiado, não gasto: `JobSettledError` é o contrato de "o run já dispôs do
-    // job". Quem escreveu às 3h é atendido às 7h — e nada sai agora.
+    // job". Reengajamento proativo às 3h acordaria o cliente — vai para as 7h.
     expect(erro).not.toBeNull();
     expect(String(erro?.message)).toMatch(/fora da janela anti-ban/);
     expect(enviados).toHaveLength(0);
   });
 
-  it("relógio DENTRO da janela: o turno corre — o gate não vira muro", async () => {
-    const erro = await rodaTurno(montaHandler(modeloQueManda("diurno"), DENTRO_DA_JANELA));
+  it("inbound_turn DENTRO da janela: CORRE — o comportamento dentro da janela segue intacto", async () => {
+    const erro = await rodaTurno(
+      "inbound_turn",
+      montaHandler("inbound_turn", modeloQueManda("reativo-diurno"), DENTRO_DA_JANELA),
+    );
+
+    expect(erro).toBeNull();
+    expect(enviados).toHaveLength(1);
+  });
+
+  it("followup_turn DENTRO da janela: CORRE — o proativo dentro da janela funciona", async () => {
+    const erro = await rodaTurno(
+      "followup_turn",
+      montaHandler("followup_turn", modeloQueManda("proativo-diurno"), DENTRO_DA_JANELA),
+    );
 
     expect(erro).toBeNull();
     expect(enviados).toHaveLength(1);

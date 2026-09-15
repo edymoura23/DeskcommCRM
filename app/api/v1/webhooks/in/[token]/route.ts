@@ -15,8 +15,9 @@ import { checkRateLimit } from "@/lib/ai/dispatcher/rate-limit";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createLeadHandler } from "@/app/api/v1/leads/_handler";
-import { emitLeadActivity } from "@/lib/leads/activity-emitter";
+import { emitLeadActivity, type EmitLeadActivityInput } from "@/lib/leads/activity-emitter";
 import { classificarLeadInicial, type ResultadoClassificacaoInicial } from "@/lib/leads/classificacao-inicial";
+import { ehIdentificadorTecnico } from "@/lib/contacts/rotulo-do-contato";
 import type { CreateLeadInput } from "@/lib/schemas";
 import { mapInboundPayload, verifyInboundSignature, type FieldMap } from "@/lib/webhooks/inbound";
 import { encontrarContatoPorTelefoneComNome } from "@/lib/channels/contato-por-telefone";
@@ -28,6 +29,11 @@ import {
   respondiLeadTitle,
   type RespondiMapped,
 } from "@/lib/webhooks/respondi";
+import {
+  isRdStationPayload,
+  mapRdStationPayload,
+  type RdStationMapped,
+} from "@/lib/webhooks/rdstation";
 import { origemDaPagina, registrarCaptacao } from "@/lib/webhooks/captacao";
 import { ipDoClienteParaInet } from "@/lib/http/ip-do-cliente";
 import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
@@ -48,6 +54,34 @@ const RATE_LIMIT_PER_MIN = 60;
 // field that failed normalizePhoneBR, for observability. Keep in sync if that
 // list changes.
 const PHONE_ALIASES_FOR_LOGGING = ["phone", "telefone", "whatsapp", "celular", "phone_number", "tel"];
+
+/**
+ * Conservador de propósito: só serve para decidir se um e-mail QUE CHEGOU pode
+ * PREENCHER um campo VAZIO no enriquecimento (Parte 2, achado 2026-09-09).
+ * Não valida entrega, não normaliza — a normalização real é a coluna gerada
+ * `email_normalized` no banco. Um "não" aqui só significa "não uso para
+ * enriquecer", nunca "recuso a captação".
+ */
+function pareceEmail(v: string): boolean {
+  const s = v.trim();
+  return s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+/**
+ * "Nome evidentemente ruim" para o enriquecimento (Parte 2): vazio, um
+ * identificador técnico (`ehIdentificadorTecnico` — `@lid`, `Contato 5431`,
+ * 9+ dígitos), ou uma string SEM NENHUMA LETRA ("34343", "---", "()"). Um nome
+ * de pessoa tem pelo menos uma letra — `\p{L}` cobre qualquer alfabeto, então
+ * um nome em CJK/cirílico/árabe passa. Conservador: na dúvida, NÃO é ruim, e o
+ * enriquecimento não toca no campo.
+ */
+function nomeEvidentementeRuim(v: string | null | undefined): boolean {
+  const s = (v ?? "").trim();
+  if (s === "") return true;
+  if (ehIdentificadorTecnico(s)) return true;
+  if (!/\p{L}/u.test(s)) return true;
+  return false;
+}
 
 function findRawPhoneIfUnnormalized(payload: Record<string, unknown>, fieldMap: FieldMap): string | null {
   const aliases = [...(fieldMap.phone ?? []), ...PHONE_ALIASES_FOR_LOGGING];
@@ -178,6 +212,22 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
     ? mapRespondiPayload(payload)
     : null;
 
+  // RD Station manda `{ leads: [ {...} ] }` — mesmo problema do Respondi (o
+  // mapeador genérico só lê chave de topo). Detecta a forma UMA vez; alimenta
+  // o idempotency key e o mapeamento de campos abaixo. Respondi tem
+  // precedência: um payload nunca é dos dois.
+  const rdStationMapped: RdStationMapped | null =
+    respondiMapped === null && isRdStationPayload(payload)
+      ? mapRdStationPayload(payload)
+      : null;
+
+  // O sinal de "mesma DEMANDA" para o guard de reconversão (achado 2026-09-09):
+  // mesmo contato + mesmo funil da fonte + mesmo `conversion_identifier`. Só o
+  // envelope RD expõe esse campo hoje — Respondi e o webhook genérico devolvem
+  // `null` aqui e mantêm o comportamento atual (um lead por conversão). Nada
+  // acoplado a um empreendimento: o guard abaixo é por `organization_id`.
+  const conversionIdentifier: string | null = rdStationMapped?.conversionIdentifier ?? null;
+
   // Idempotência (spec §5): `external_id` é campo reservado do envio — quem
   // integra via sistema (Zapier/n8n/loja) manda o ID único do disparo e o
   // reenvio automático (retry por timeout) NUNCA duplica o lead. O índice
@@ -200,13 +250,30 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // uuid de 36 chars, ~60× abaixo do limiar. É higiene de simetria: dois
       // ramos do mesmo `?:` produzindo a mesma coluna com regras diferentes é o
       // tipo de coisa que só aparece quando alguém manda um corpo fabricado.
-      : (respondiMapped?.externalId?.slice(0, 255) ?? null);
+      : (respondiMapped?.externalId?.slice(0, 255) ??
+        rdStationMapped?.externalId?.slice(0, 255) ??
+        null);
 
   const respondWithLead = (leadId: string): NextResponse => {
     if (isForm && source.redirect_to) {
       return NextResponse.redirect(source.redirect_to as string, 303);
     }
     return ok({ lead_id: leadId }, { requestId });
+  };
+
+  // Fire-and-forget, como o resto das bordas desta rota: a timeline não derruba
+  // a captação que ela descreve. Falha vira log nomeado.
+  const registrarAtividade = async (input: EmitLeadActivityInput): Promise<void> => {
+    const r = await emitLeadActivity(admin, input);
+    if (!r.ok) {
+      logger.error("[webhooks.inbound] activity emit failed", {
+        webhookSourceId: source.id,
+        organizationId: source.organization_id,
+        leadId: input.leadId,
+        type: input.type,
+        error: r.error,
+      });
+    }
   };
 
   // Traz o CONTATO junto, e não só o id do lead: a linha de captação precisa do
@@ -239,8 +306,12 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
   //
   // O `respondiMapped ??` é do PR #326: sem ele o payload aninhado do Respondi
   // volta a cair no mapeador genérico, que é o defeito que aquele PR conserta.
+  // O `rdStationMapped ??` é a mesma figura para o envelope `leads[]` do RD
+  // Station (achado 2026-09-08). Ordem: Respondi, RD Station, genérico.
   const mapped =
-    respondiMapped ?? mapInboundPayload(externalId ? payloadForMapping : payload, fieldMap);
+    respondiMapped ??
+    rdStationMapped ??
+    mapInboundPayload(externalId ? payloadForMapping : payload, fieldMap);
   if (!mapped.phone) {
     const rawPhone = findRawPhoneIfUnnormalized(payload, fieldMap);
     if (rawPhone) mapped.source_metadata.raw_phone = rawPhone;
@@ -449,6 +520,201 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
     }
   }
 
+  // ─── Enriquecimento conservador do contato JÁ EXISTENTE (Parte 2) ────────────
+  //
+  // Decisão humana (2026-09-09): uma reconversão com dado PIOR não pode
+  // sobrescrever um dado válido — mas um valor evidentemente ruivo fixado na
+  // primeira conversão ("34343", só dígitos) também não pode ficar preso para
+  // sempre se depois chegar informação melhor. Regras estritas:
+  //   • nome  — troca SÓ se o atual é "evidentemente ruim" (vazio, identificador
+  //             técnico, ou sem NENHUMA letra: "34343") E o novo é plausível;
+  //   • email — preenche SÓ se o atual está vazio E o novo parece e-mail;
+  //   • telefone — NUNCA muda.
+  // Nome/e-mail já válidos nunca são tocados. Só o caminho com
+  // `conversionIdentifier` (envelope RD) entra — não altera Respondi nem o
+  // webhook genérico. Toda alteração vira atividade `contact_enriched` com
+  // antes/depois + event_uuid (emitida junto ao lead, mais abaixo).
+  const enriquecimentos: Array<{ campo: "name" | "email"; de: string | null; para: string }> = [];
+  if (conversionIdentifier && contactId && !contatoNasceuAqui) {
+    const { data: atual } = await admin
+      .from("contacts")
+      .select("name, email")
+      .eq("id", contactId)
+      .eq("organization_id", source.organization_id)
+      .maybeSingle();
+    if (atual) {
+      const patch: Record<string, string> = {};
+      const nomeAtual = ((atual.name as string | null) ?? null);
+      if (
+        mapped.name &&
+        !nomeEvidentementeRuim(mapped.name) &&
+        nomeEvidentementeRuim(nomeAtual)
+      ) {
+        patch.name = mapped.name;
+        enriquecimentos.push({ campo: "name", de: nomeAtual, para: mapped.name });
+      }
+      const emailAtual = ((atual.email as string | null) ?? null);
+      if (
+        mapped.email &&
+        pareceEmail(mapped.email) &&
+        (emailAtual === null || emailAtual.trim() === "")
+      ) {
+        patch.email = mapped.email;
+        enriquecimentos.push({ campo: "email", de: emailAtual, para: mapped.email });
+      }
+      if (Object.keys(patch).length > 0) {
+        const { error: eEnrich } = await admin
+          .from("contacts")
+          .update(patch)
+          .eq("id", contactId)
+          .eq("organization_id", source.organization_id);
+        if (eEnrich) {
+          logger.error("[webhooks.inbound] contact enrich failed", {
+            webhookSourceId: source.id,
+            organizationId: source.organization_id,
+            contactId,
+            error: eEnrich.message,
+          });
+          enriquecimentos.length = 0; // não anuncia o que não gravou
+        }
+      }
+    }
+  }
+
+  // ─── Guard de reconversão (Parte 1) ─────────────────────────────────────────
+  //
+  // Genérico e por `organization_id`: MESMO contato + MESMO funil da fonte +
+  // MESMO `conversion_identifier`.
+  //   • lead anterior ABERTO  → NÃO cria card; registra a conversão como
+  //     atividade no lead aberto; outcome 'reconversao'; NÃO redispara 1º toque.
+  //   • lead anterior FECHADO (won/lost) → cria demanda nova e aborda de novo
+  //     (decisão humana 2026-09-09), marcando o lead fechado para o histórico
+  //     dele não mentir que nada mais aconteceu.
+  //   • sem lead da mesma demanda → comportamento atual (um lead por conversão).
+  //
+  // O event_uuid é preservado para idempotência: no caminho ABERTO nenhum lead
+  // novo nasce, então `findLeadByExternalId` (fast-path lá em cima) NÃO cobre o
+  // retry — a checagem própria abaixo (atividade já registrada com este
+  // event_uuid) faz esse papel. No caminho FECHADO o lead novo nasce com o
+  // `external_id`, e aí o fast-path normal já cobre o retry.
+  //
+  // Prefere o UUID PURO (`rd_event_uuid`) — o campo do payload se chama
+  // `event_uuid`, não deve carregar a forma prefixada `rdstation:evt:<uuid>`.
+  // Cai para `externalId` (`rdstation:lead:<id>`) só quando a conversão não
+  // trouxe event_uuid. O dedup abaixo compara contra o MESMO valor gravado,
+  // então a idempotência segue consistente qualquer que seja o ramo.
+  const eventoDaReconversao =
+    (mapped.custom_fields.rd_event_uuid as string | undefined) ?? externalId ?? null;
+  let reconversaoDeFechado: "won" | "lost" | null = null;
+  let leadFechadoParaMarcar: string | null = null;
+  if (conversionIdentifier && contactId) {
+    const { data: anteriores } = await admin
+      .from("crm_leads")
+      .select("id, status, custom_fields, created_at")
+      .eq("organization_id", source.organization_id)
+      .eq("contact_id", contactId)
+      .eq("pipeline_id", source.default_pipeline_id)
+      .eq("source", "webhook");
+    const daMesmaDemanda = ((anteriores ?? []) as Array<Record<string, unknown>>)
+      .filter((l) => {
+        const cf = (l.custom_fields ?? {}) as Record<string, unknown>;
+        return cf.rd_conversion_identifier === conversionIdentifier;
+      })
+      .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+
+    const maisRecente = daMesmaDemanda[0];
+    if (maisRecente) {
+      const status = String(maisRecente.status);
+      const leadAnteriorId = String(maisRecente.id);
+
+      if (status === "open") {
+        // Retry desta MESMA reconversão? (RD reentrega o webhook ~5s depois.)
+        // Sem lead novo para o índice único derrubar, a idempotência é esta:
+        // já existe atividade de reconversão com este event_uuid neste lead.
+        const { data: jaRegistradas } = await admin
+          .from("crm_lead_activities")
+          .select("payload")
+          .eq("organization_id", source.organization_id)
+          .eq("lead_id", leadAnteriorId)
+          .eq("type", "webhook_reconversion");
+        const retryDeReconversao =
+          eventoDaReconversao != null &&
+          ((jaRegistradas ?? []) as Array<{ payload: Record<string, unknown> | null }>).some(
+            (a) => (a.payload ?? {}).event_uuid === eventoDaReconversao,
+          );
+        if (retryDeReconversao) {
+          await registrarCaptacao(admin, {
+            ...fonteDaCaptacao,
+            ...origemDaCaptacao,
+            ...dadosDaCaptacao,
+            leadId: leadAnteriorId,
+            contactId,
+            outcome: "duplicado",
+          });
+          return respondWithLead(leadAnteriorId);
+        }
+
+        await registrarAtividade({
+          organizationId: source.organization_id,
+          leadId: leadAnteriorId,
+          contactId,
+          type: "webhook_reconversion",
+          sourceModule: "webhook",
+          sourceId: source.id,
+          actor: { type: "webhook_source", id: source.id },
+          reason: "Nova conversão do mesmo contato no mesmo funil e identificador — sem card novo.",
+          payload: {
+            webhook_source_id: source.id,
+            conversion_identifier: conversionIdentifier,
+            event_uuid: eventoDaReconversao,
+          },
+        });
+        if (enriquecimentos.length > 0) {
+          await registrarAtividade({
+            organizationId: source.organization_id,
+            leadId: leadAnteriorId,
+            contactId,
+            type: "contact_enriched",
+            sourceModule: "webhook",
+            sourceId: source.id,
+            actor: { type: "webhook_source", id: source.id },
+            reason: `Dados do contato enriquecidos na reconversão: ${enriquecimentos.map((e) => e.campo).join(", ")}.`,
+            payload: {
+              webhook_source_id: source.id,
+              event_uuid: eventoDaReconversao,
+              alteracoes: enriquecimentos,
+            },
+          });
+        }
+        await registrarCaptacao(admin, {
+          ...fonteDaCaptacao,
+          ...origemDaCaptacao,
+          ...dadosDaCaptacao,
+          leadId: leadAnteriorId,
+          contactId,
+          outcome: "reconversao",
+        });
+        await audit({
+          action: "webhook.lead_reconversion",
+          organizationId: source.organization_id,
+          resourceType: "crm_lead",
+          resourceId: leadAnteriorId,
+          requestId,
+          metadata: { webhook_source_id: source.id, conversion_identifier: conversionIdentifier },
+        });
+        // Sem novo `lead.created` — nada a drenar, e a 1ª abordagem NÃO
+        // redispara nesta reconversão (decisão humana).
+        return respondWithLead(leadAnteriorId);
+      }
+
+      // Lead anterior FECHADO: segue o fluxo normal e cria card novo. A marca
+      // no lead fechado é emitida DEPOIS que o card novo nasce (abaixo) — se a
+      // criação falhar, o retry recria sem marca dupla.
+      reconversaoDeFechado = status === "won" ? "won" : "lost";
+      leadFechadoParaMarcar = leadAnteriorId;
+    }
+  }
+
   // Classificação inicial (só Respondi por ora — os motivos de
   // desqualificação/revisão e o campo de orçamento são específicos do form
   // "Imobiliárias e Incorporadoras"; um webhook genérico não tem
@@ -561,6 +827,51 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
     requestId,
     metadata: { webhook_source_id: source.id },
   });
+
+  // Reconversão sobre lead anterior FECHADO (won/lost): o card novo já nasceu;
+  // a marca vai no lead fechado antigo para o dossiê dele não terminar sem
+  // dizer que o contato voltou a se interessar.
+  if (reconversaoDeFechado && leadFechadoParaMarcar) {
+    await registrarAtividade({
+      organizationId: source.organization_id,
+      leadId: leadFechadoParaMarcar,
+      contactId: contactId ?? null,
+      type:
+        reconversaoDeFechado === "won"
+          ? "webhook_reconversion_after_won"
+          : "webhook_reconversion_after_lost",
+      sourceModule: "webhook",
+      sourceId: source.id,
+      actor: { type: "webhook_source", id: source.id },
+      reason:
+        reconversaoDeFechado === "won"
+          ? "Contato converteu de novo neste funil após o negócio anterior ter sido ganho — card novo criado."
+          : "Contato converteu de novo neste funil após o negócio anterior ter sido perdido — card novo criado.",
+      payload: {
+        webhook_source_id: source.id,
+        conversion_identifier: conversionIdentifier,
+        event_uuid: eventoDaReconversao,
+        novo_lead_id: String(lead.id),
+      },
+    });
+  }
+
+  // Enriquecimento aplicado ao contato existente (Parte 2): a linha entra no
+  // lead que acabou de nascer — caminho SEM lead da mesma demanda, ou com lead
+  // anterior FECHADO. O caminho de lead ABERTO já emitiu e retornou acima.
+  if (enriquecimentos.length > 0) {
+    await registrarAtividade({
+      organizationId: source.organization_id,
+      leadId: String(lead.id),
+      contactId: contactId ?? null,
+      type: "contact_enriched",
+      sourceModule: "webhook",
+      sourceId: source.id,
+      actor: { type: "webhook_source", id: source.id },
+      reason: `Dados do contato enriquecidos na captação: ${enriquecimentos.map((e) => e.campo).join(", ")}.`,
+      payload: { webhook_source_id: source.id, alteracoes: enriquecimentos },
+    });
+  }
 
   // Recusa de consentimento é sinal, não ausência de sinal (mesma regra da
   // timeline pra veto/handoff): registrada aqui pra quem olha o dossiê saber

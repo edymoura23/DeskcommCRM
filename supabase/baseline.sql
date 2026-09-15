@@ -17004,6 +17004,24 @@ revoke execute on function public.fn_conversation_assign(uuid, uuid, uuid, text,
 grant  execute on function public.fn_conversation_assign(uuid, uuid, uuid, text, uuid, boolean)
   to authenticated, service_role;
 
+-- ---- webhook_lead_captures.outcome aceita 'reconversao' (migration 0203) ----
+--
+-- A rota de captação pública passou a reconhecer RE-CONVERSÃO: o mesmo contato
+-- convertendo de novo no mesmo funil/identificador, com um lead já ABERTO da
+-- demanda, NÃO cria card novo — registra a conversão como atividade no lead
+-- existente. Esse desfecho precisa de nome próprio na tela "Leads recebidos":
+-- classificá-lo como 'duplicado' (retry de ferramenta) apagaria a diferença
+-- entre "a ferramenta reenviou o mesmo POST" e "a pessoa converteu outra vez".
+-- Widening puro — nenhuma linha existente viola. Idempotente (drop + add).
+alter table public.webhook_lead_captures
+  drop constraint if exists webhook_lead_captures_outcome_check;
+alter table public.webhook_lead_captures
+  add constraint webhook_lead_captures_outcome_check
+  check (outcome in ('criado', 'duplicado', 'recusado', 'reconversao'));
+
+comment on column public.webhook_lead_captures.outcome is
+  'criado = virou lead novo; duplicado = mesmo external_id já capturado antes (retry da ferramenta); recusado = não entrou (reject_reason diz por quê); reconversao = o mesmo contato converteu de novo no mesmo funil/identificador havendo lead aberto — sem card novo, a conversão virou atividade no lead existente.';
+
 -- ---- visibilidade de contato por atribuição + trava de claim do agent (migration 0204) ----
 --
 -- O `visibility_mode` (0035/0036) restringe conversations/messages/crm_leads/

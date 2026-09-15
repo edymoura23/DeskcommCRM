@@ -1078,6 +1078,27 @@ function turnoVaiFalarComOLead(job: JobRow): boolean {
   return purpose === undefined || purpose === 'send_message';
 }
 
+/**
+ * Este turno é ADIADO quando cai fora da janela de horário (7h–22h no fuso do
+ * tenant, domingo conforme o knob)?
+ *
+ * SÓ o PROATIVO — follow-up / reengajamento (`followup_turn` com envio). A
+ * RESPOSTA REATIVA a um inbound do cliente (`inbound_turn`, `case_reply_turn`)
+ * funciona 24/7: a janela existe para não INCOMODAR quem não pediu, não para
+ * calar quem acabou de escrever — e responder dentro da janela de atendimento de
+ * 24h é o envio de MENOR risco de banimento. Warm-up, cap diário e
+ * throttle+jitter continuam valendo para os dois, via `pacingGate` — `reactiveInbound`
+ * ali pula APENAS janela+domingo (ver `decidePacing`).
+ *
+ * Antes (bug estrutural medido no E2E do JBA, 2026-09-08): a guarda usava
+ * `turnoVaiFalarComOLead` e adiava o turno reativo INTEIRO; um cliente que
+ * escrevia 01h30 local só recebia resposta às 07h — sem LLM, sem RAG, sem nada
+ * até a abertura da janela.
+ */
+export function turnoAdiaPorJanela(job: JobRow): boolean {
+  return job.kind === 'followup_turn' && turnoVaiFalarComOLead(job);
+}
+
 async function executarTurnoDoAgente(
   deps: InboundTurnDeps,
   job: JobRow,
@@ -1143,7 +1164,7 @@ async function executarTurnoDoAgente(
   // Só a JANELA adia. Cap diário e warm-up continuam com o gate de envio: eles
   // dependem de quanto já saiu hoje, e antecipá-los aqui adiaria turno que, na
   // hora do envio, teria passado.
-  if (turnoVaiFalarComOLead(job)) {
+  if (turnoAdiaPorJanela(job)) {
     const { knobs } = await loadChannelKnobs(pool, tenantId, input.channelSessionId, runLog);
     const agora = clock();
     if (!janelaDeEnvioAberta(agora, knobs)) {
@@ -1391,6 +1412,11 @@ async function executarTurnoDoAgente(
       log: runLog,
       lgpd,
       agentId: agentConfig?.agentId ?? null,
+      // O aviso ao lead é consequência DIRETA deste turno REATIVO — inbound_turn
+      // (cliente pediu humano / opt-out) ou case_reply_turn. Reativo → o gate
+      // `pacing` da cadeia do aviso pula a janela de horário/domingo (warm-up /
+      // cap diário / throttle seguem). Proativo não chega aqui.
+      reactiveInbound: job.kind === 'inbound_turn' || job.kind === 'case_reply_turn',
       ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     },
@@ -1780,6 +1806,8 @@ async function executarTurnoDoAgente(
           body: rendered,
           // Só ESTE gate muda; stop, LGPD e pacing continuam valendo integralmente.
           isTemplate: true,
+          // Template de resposta ao cliente também é reativo: pula a janela no gate pacing.
+          reactiveInbound: job.kind === 'inbound_turn' || job.kind === 'case_reply_turn',
           optedOutThisTurn,
           crmDailyLimit: null,
           now: clock(),
@@ -1893,6 +1921,10 @@ async function executarTurnoDoAgente(
             leadId,
             jobId: job.id,
             channelSessionId: input.channelSessionId,
+            // Resposta reativa ao cliente (inbound/case_reply): o gate `pacing`
+            // ignora a janela de horário e domingo — warm-up/cap/throttle seguem.
+            // Turno proativo (followup) não chega aqui com este flag (é false).
+            reactiveInbound: job.kind === 'inbound_turn' || job.kind === 'case_reply_turn',
             body,
             optedOutThisTurn,
             // ponytail: channel_sessions.daily_message_limit do CRM ainda não é lido
