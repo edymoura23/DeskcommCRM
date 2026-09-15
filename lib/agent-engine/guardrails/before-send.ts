@@ -120,6 +120,13 @@ export interface GateContext {
     state: PacingState;
     crmDailyLimit: number | null;
     rng?: () => number;
+    /**
+     * Turno REATIVO a inbound do cliente (inbound_turn / case_reply_turn): o
+     * gate `pacing` pula a janela de horário e domingo, mantendo warm-up / cap
+     * diário / throttle. Ausente = proativo/desconhecido → janela vale
+     * (comportamento atual).
+     */
+    reactiveInbound?: boolean;
   };
   spinning: {
     knobs: SpinningKnobs;
@@ -455,6 +462,8 @@ export const pacingGate: Gate = {
       crmDailyLimit: ctx.pacing.crmDailyLimit,
       banRisk,
       rng: ctx.pacing.rng,
+      // Reativo ao cliente: pula SÓ a janela/domingo (warm-up/cap/throttle seguem).
+      ...(ctx.pacing.reactiveInbound === true ? { reactiveInbound: true } : {}),
     });
     if (!decision.allow) {
       return { pass: false, code: decision.code, reason: decision.reason, nextAllowedAt: decision.nextAllowedAt };
@@ -630,6 +639,14 @@ export interface RunBeforeSendArgs {
    * o cap. Ponto de injeção: quando o drain expuser o limite da sessão, passar aqui.
    */
   crmDailyLimit: number | null;
+  /**
+   * Esta tentativa de envio pertence a um turno REATIVO a inbound do cliente
+   * (inbound_turn / case_reply_turn)? `true` faz o gate `pacing` pular a janela
+   * de horário e o bloqueio de domingo — mantendo warm-up, cap diário e
+   * throttle. Ausente = proativo/desconhecido (follow-up, reengajamento,
+   * caminhos legados): a janela continua valendo, como hoje.
+   */
+  reactiveInbound?: boolean;
   now: Date;
   /** injeções de teste (jitter determinístico + espera sem relógio real). */
   rng?: () => number;
@@ -745,7 +762,13 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
       optedOut,
       provider,
       messagingWindow: { lastInboundAt, ...(args.isTemplate === true ? { isTemplate: true } : {}) },
-      pacing: { knobs: pacingCfg.knobs, state: pacingState, crmDailyLimit: args.crmDailyLimit, rng: args.rng },
+      pacing: {
+        knobs: pacingCfg.knobs,
+        state: pacingState,
+        crmDailyLimit: args.crmDailyLimit,
+        rng: args.rng,
+        ...(args.reactiveInbound === true ? { reactiveInbound: true } : {}),
+      },
       spinning: { knobs: spinningKnobs, window },
       ...(args.enforceSpinning === false ? { spinningEnforced: false as const } : {}),
       promise: { table: promise?.table ?? null, ...(promise?.versionId !== undefined ? { versionId: promise.versionId } : {}) },

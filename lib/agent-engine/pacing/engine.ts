@@ -41,6 +41,17 @@ export interface PacingInput {
    * Omitir = `true`: nenhum chamador existente muda de comportamento.
    */
   banRisk?: boolean;
+  /**
+   * Esta decisão é para uma RESPOSTA REATIVA a um inbound do cliente
+   * (inbound_turn / case_reply_turn)? `true` pula a JANELA de horário e o
+   * bloqueio de domingo — a janela existe para não INCOMODAR quem não pediu,
+   * não para calar quem acabou de escrever, e responder dentro da janela de
+   * atendimento de 24h é o envio de MENOR risco de banimento. NÃO afeta
+   * warm-up, cap diário nem throttle+jitter (esses valem para qualquer envio).
+   * Omitir = `false`: nenhum chamador existente muda de comportamento — o
+   * turno PROATIVO (follow-up/reengajamento) continua respeitando a janela.
+   */
+  reactiveInbound?: boolean;
   /** [0,1) — injetável nos testes; default Math.random. */
   rng?: () => number;
 }
@@ -59,7 +70,10 @@ export function decidePacing(input: PacingInput): PacingDecision {
   const banRisk = input.banRisk ?? true; // default preserva o comportamento atual
   const wall = wallClock(now, knobs.timezone);
 
-  if (!insideWindow(wall, knobs)) {
+  // JANELA (horário comercial + domingo) = CORTESIA. Pulada SÓ para resposta
+  // reativa a inbound do cliente: quem escreveu 01h30 espera resposta agora, não
+  // às 07h. warm-up / cap diário / throttle abaixo continuam valendo.
+  if (!input.reactiveInbound && !insideWindow(wall, knobs)) {
     const nextAllowedAt = addMs(nextWindowOpen(now, knobs), jitterOf(rng, knobs));
     return {
       allow: false,
