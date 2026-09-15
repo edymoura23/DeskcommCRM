@@ -22,9 +22,18 @@
  * é ORG-WIDE `(organization_id, contact_id)` (migration 0062, Task 8.6) — um
  * contato já vivo em QUALQUER fluxo da org barra novo enrollment (1 follow-up
  * vivo por lead), 23505 vira skip silencioso (`insertEnrollment` devolve
- * `inserted:false`), nunca erro. Um contato que COMPLETOU ou foi cancelado
- * pode ser re-enrollado na varredura seguinte se continuar silencioso —
- * aceitável no MVP, sem cooldown table.
+ * `inserted:false`), nunca erro.
+ *
+ * RE-ENTRADA POR EPISÓDIO NOVO (não "cooldown"): um contato que já COMPLETOU
+ * ou teve enrollment cancelado/morto NESTE pointer só volta à fila se houver um
+ * inbound REAL dele POSTERIOR ao fim daquele enrollment — ou seja, um novo
+ * episódio de silêncio, não a persistência do antigo. Sem essa guarda, um
+ * contato que parou de responder ficava "silencioso desde X" para sempre (as
+ * mensagens do próprio fluxo são outbound e não mexem em `last_inbound_at`), e
+ * cada sequência esgotada gerava a próxima — laço observado em produção
+ * (JBA/Corteux, 2026-09-08). A guarda é do gatilho de SILÊNCIO só: `stage_change`
+ * e `case_opened` já são event-driven (cada re-entrada exige uma linha nova de
+ * event_log) e não têm auto-laço.
  *
  * agent_id: cada pointer é gateado por `resolveAgentForAutomaticTrigger`, que
  * devolve o agente publicado que ARMA o pointer (menor uuid se >1) — esse
@@ -53,8 +62,26 @@ export interface SilencePointer {
 export interface SilenceSweepDb {
   /** Pointers ativos com trigger_config.kind='silence', de TODAS as orgs. */
   loadActiveSilencePointers(): Promise<SilencePointer[]>;
-  /** Contact ids da org sem inbound desde `cutoffIso` (inclusive); `segments` vazio = todos. */
-  loadSilentContactIds(orgId: string, cutoffIso: string, segments: string[]): Promise<string[]>;
+  /**
+   * Contatos da org sem inbound desde `cutoffIso` (inclusive); `segments` vazio
+   * = todos. `lastInboundAtMs` = instante (epoch ms) do inbound REAL mais
+   * recente do contato — o insumo da guarda de episódio novo em `runSilenceSweep`.
+   */
+  loadSilentContactIds(
+    orgId: string,
+    cutoffIso: string,
+    segments: string[],
+  ): Promise<Array<{ contactId: string; lastInboundAtMs: number }>>;
+  /**
+   * Para cada contato em `contactIds`, o instante (epoch ms) do FIM do enrollment
+   * TERMINAL mais recente dele NESTE pointer (`coalesce(completed_at, updated_at)`
+   * do mais recente entre status `completed`/`cancelled`/`dead`). Contato sem
+   * enrollment terminal nesse pointer não aparece no mapa.
+   */
+  loadLastTerminalEnrollmentEndByContact(
+    pointerId: string,
+    contactIds: string[],
+  ): Promise<Map<string, number>>;
   /** id do nó `trigger` do grafo pinado da version; `null` se version/nó não existir (defensivo — não deveria acontecer, validate-publish garante 1 trigger). */
   loadTriggerNodeId(orgId: string, versionId: string): Promise<string | null>;
   /** Insere o enrollment nascendo no nó trigger; `inserted:false` = 23505 (já vivo nesse pointer) → skip. */
@@ -74,6 +101,8 @@ export interface SilenceSweepSummary {
   pointers_gated_out: number;
   enrolled: number;
   skipped_existing: number;
+  /** Contatos silenciosos NÃO inscritos porque não houve inbound novo desde o fim do último enrollment terminal deles neste pointer (guarda de episódio novo). */
+  skipped_no_new_inbound: number;
 }
 
 export interface SilenceSweepDeps {
@@ -89,6 +118,7 @@ export async function runSilenceSweep(deps: SilenceSweepDeps): Promise<SilenceSw
     pointers_gated_out: 0,
     enrolled: 0,
     skipped_existing: 0,
+    skipped_no_new_inbound: 0,
   };
 
   const pointers = await db.loadActiveSilencePointers();
@@ -121,10 +151,28 @@ export async function runSilenceSweep(deps: SilenceSweepDeps): Promise<SilenceSw
     if (!triggerNodeId) continue;
 
     const cutoffIso = new Date(clock().getTime() - pointer.threshold_minutes * 60_000).toISOString();
-    const contactIds = await db.loadSilentContactIds(pointer.organization_id, cutoffIso, pointer.segments);
+    const silent = await db.loadSilentContactIds(pointer.organization_id, cutoffIso, pointer.segments);
     const nextEvalAt = clock().toISOString();
 
-    for (const contactId of contactIds) {
+    // GUARDA DE EPISÓDIO NOVO: um contato que já teve enrollment terminal neste
+    // pointer só volta se falou (inbound real) DEPOIS do fim daquele enrollment.
+    // Sem enrollment terminal → 1ª inscrição, passa direto. A ESCRITA continua
+    // serializada por `idx_followup_enrollments_one_live` (23505 → skip): esta
+    // guarda só decide QUEM entra na fila, não substitui o índice.
+    const terminalEnds =
+      silent.length > 0
+        ? await db.loadLastTerminalEnrollmentEndByContact(
+            pointer.id,
+            silent.map((s) => s.contactId),
+          )
+        : new Map<string, number>();
+    const elegiveis = silent.filter((s) => {
+      const end = terminalEnds.get(s.contactId);
+      return end === undefined || s.lastInboundAtMs > end;
+    });
+    summary.skipped_no_new_inbound += silent.length - elegiveis.length;
+
+    for (const { contactId } of elegiveis) {
       const { inserted } = await db.insertEnrollment({
         organization_id: pointer.organization_id,
         pointer_id: pointer.id,
@@ -203,14 +251,38 @@ export function createSupabaseSilenceSweepDb(admin: SupabaseClient): SilenceSwee
         }
       }
 
-      const silentIds: string[] = [];
+      const silent: Array<{ contactId: string; lastInboundAtMs: number }> = [];
       for (const [contactId, v] of latest) {
         if (v.blocked) continue;
         if (v.at > cutoff) continue; // conversou depois do corte — não é silêncio
         if (segments.length > 0 && !segments.some((s) => v.tags.includes(s))) continue;
-        silentIds.push(contactId);
+        silent.push({ contactId, lastInboundAtMs: v.at });
       }
-      return silentIds;
+      return silent;
+    },
+
+    async loadLastTerminalEnrollmentEndByContact(pointerId, contactIds) {
+      const out = new Map<string, number>();
+      if (contactIds.length === 0) return out;
+      const { data, error } = await admin
+        .from("followup_enrollments")
+        .select("contact_id, completed_at, updated_at")
+        .eq("pointer_id", pointerId)
+        .in("contact_id", contactIds)
+        .in("status", ["completed", "cancelled", "dead"]);
+      if (error) throw new Error(error.message);
+      for (const row of (data ?? []) as Array<{
+        contact_id: string;
+        completed_at: string | null;
+        updated_at: string | null;
+      }>) {
+        const endIso = row.completed_at ?? row.updated_at;
+        if (!endIso) continue;
+        const t = new Date(endIso).getTime();
+        const prev = out.get(row.contact_id);
+        if (prev === undefined || t > prev) out.set(row.contact_id, t);
+      }
+      return out;
     },
 
     async loadTriggerNodeId(orgId, versionId) {

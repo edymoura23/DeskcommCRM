@@ -204,6 +204,10 @@ export const AUDIT_ACTIONS = [
   "webhook.source_updated",
   "webhook.source_deleted",
   "webhook.lead_received",
+  // Reconversão: o mesmo contato converteu de novo no mesmo funil/identificador
+  // e já havia lead ABERTO — nenhum card novo, a conversão virou atividade no
+  // lead existente. Mutação relevante (grava atividade + captação), com rastro.
+  "webhook.lead_reconversion",
   "webhook.inbound_invalid_signature",
   "automation.rule_created",
   "automation.rule_updated",

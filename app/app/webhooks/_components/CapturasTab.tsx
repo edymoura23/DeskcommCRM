@@ -40,12 +40,14 @@ export const DESFECHO_LABEL: Record<DesfechoDaCaptacao, string> = {
   criado: "Virou lead",
   duplicado: "Reenvio",
   recusado: "Não entrou",
+  reconversao: "Reconversão",
 };
 
 const DESFECHO_VARIANTE: Record<DesfechoDaCaptacao, "success" | "neutral" | "error"> = {
   criado: "success",
   duplicado: "neutral",
   recusado: "error",
+  reconversao: "neutral",
 };
 
 /**
