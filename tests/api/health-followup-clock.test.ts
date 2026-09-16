@@ -78,7 +78,7 @@ describe("GET /api/v1/health — followup_clock", () => {
 
   it("cron parado (última batida há muito tempo) → followup_clock down, resposta 503 unhealthy", async () => {
     const { createAdminClient } = await import("@/lib/supabase/admin");
-    const staleTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const staleTimestamp = new Date(Date.now() - 21 * 60 * 1000).toISOString();
     vi.mocked(createAdminClient).mockReturnValue(
       maybeSingleResult({ data: { last_run_at: staleTimestamp }, error: null }) as never,
     );

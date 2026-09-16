@@ -176,9 +176,11 @@ async function checkWaha(): Promise<Check> {
   }
 }
 
-/** O worker precisa bater a cada ~1min (crontab do scheduler); 3x o intervalo
- *  já é folga suficiente sem disparar falso-positivo em cold start. */
-const FOLLOWUP_CLOCK_STALE_MS = 3 * 60 * 1000;
+
+// O relógio externo pode usar GitHub Actions a cada 5 min, cujo schedule
+// pode atrasar 5–15 min normalmente. 20 min cobre a cadência nominal +
+// o atraso documentado sem declarar uma instalação saudável como parada.
+const FOLLOWUP_CLOCK_STALE_MS = 20 * 60 * 1000;
 
 /** O relógio do follow-up (silence-sweep, retomada pós-handoff, roteamento)
  *  depende de alguma coisa batendo em `followup-flow-worker` — no self-host é
