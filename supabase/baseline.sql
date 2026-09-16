@@ -17460,6 +17460,21 @@ grant  execute on function public.fn_conversation_assign(uuid, uuid, uuid, text,
 
 notify pgrst, 'reload schema';
 
+-- ---- o relógio do sistema pode parar sem que nenhuma tela avise (migration 0205) ----
+--
+-- Ver cabeçalho completo em supabase/migrations/20260915210000_0205_cron_heartbeats.sql.
+-- `cron_heartbeats`: batimento cru de crons relevantes, independente de efeito;
+-- consumido por /api/v1/health para acusar relógio parado.
+create table if not exists public.cron_heartbeats (
+  job_name text primary key,
+  last_run_at timestamptz not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.cron_heartbeats enable row level security;
+
+revoke all on public.cron_heartbeats from anon, authenticated;
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ ESTE BLOCO É, DE PROPÓSITO, O ÚLTIMO DO ARQUIVO. Apêndice novo entra ANTES

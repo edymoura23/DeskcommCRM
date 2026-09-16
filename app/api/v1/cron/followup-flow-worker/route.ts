@@ -29,6 +29,7 @@ import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseAdminClient, runFollowupTick, type FollowupJobRequest } from "@/lib/followup/engine";
 import { createSupabaseFollowupGateDb } from "@/lib/followup/agent-followup-gate";
+import { registrarBatidaDoFollowup } from "@/lib/followup/heartbeat";
 import { createSupabaseSilenceSweepDb, runSilenceSweep } from "@/lib/followup/silence-sweep";
 
 export const dynamic = "force-dynamic";
@@ -58,6 +59,15 @@ async function handle(req: NextRequest): Promise<Response> {
   }
 
   const admin = createAdminClient();
+
+  // Batimento cru — grava a CADA chamada, mesmo que o tick não faça nada e mesmo
+  // que `runFollowupTick` lance. Independente do audit log (que só registra tick
+  // com efeito, de propósito — CLAUDE.md, doutrina de Audit log): sem isto, um
+  // relógio externo que para de bater não deixa rastro nenhum, em lugar nenhum
+  // (ver migration 0205). No Vercel Hobby quem grava esta MESMA chave é
+  // `lib/relogio/executar.ts` — ver `lib/followup/heartbeat.ts`.
+  registrarBatidaDoFollowup(admin, "followup-flow-worker.cron", { requestId });
+
   const deps = {
     db: createSupabaseAdminClient(admin),
     clock: () => new Date(),

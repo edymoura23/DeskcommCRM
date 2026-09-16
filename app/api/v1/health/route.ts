@@ -26,6 +26,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { env } from "@/lib/env";
 import { alvoDe, classificarFalhaDeAlcance, type FalhaDeAlcance } from "@/lib/net/alcance";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -37,7 +38,8 @@ type MotivoDeFalha =
   | FalhaDeAlcance
   | "credencial_recusada"
   | "resposta_inesperada"
-  | "nao_configurado";
+  | "nao_configurado"
+  | "relogio_parado";
 
 type Check = {
   status: CheckStatus;
@@ -174,6 +176,55 @@ async function checkWaha(): Promise<Check> {
   }
 }
 
+/** O worker precisa bater a cada ~1min (crontab do scheduler); 3x o intervalo
+ *  já é folga suficiente sem disparar falso-positivo em cold start. */
+const FOLLOWUP_CLOCK_STALE_MS = 3 * 60 * 1000;
+
+/** O relógio do follow-up (silence-sweep, retomada pós-handoff, roteamento)
+ *  depende de alguma coisa batendo em `followup-flow-worker` — no self-host é
+ *  o cron dedicado (container `scheduler`); no Vercel Hobby (sem esse
+ *  container — caso do JBA) é `/api/v1/system/relogio/tick`, batido por um
+ *  cron externo (GitHub Actions / cron-job.org). Os dois motores escrevem no
+ *  MESMO `cron_heartbeats.job_name` (ver `lib/relogio/executar.ts`), então
+ *  este check não presume qual dos dois está de pé — só se ALGUM bateu. Se
+ *  nenhum bate, o tick simplesmente não roda — sem erro, sem log, sem audit
+ *  (que só registra tick com efeito) —, e nenhuma outra superfície do produto
+ *  acusa (migration 0205). */
+async function checkFollowupClock(): Promise<Check> {
+  const t0 = Date.now();
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("cron_heartbeats")
+      .select("last_run_at")
+      .eq("job_name", "followup-flow-worker")
+      .maybeSingle();
+    if (error) {
+      return { status: "down", latency_ms: Date.now() - t0, error: error.message, reason: "resposta_inesperada" };
+    }
+    if (!data) {
+      return { status: "degraded", latency_ms: Date.now() - t0, error: "nunca bateu", reason: "relogio_parado" };
+    }
+    const idadeMs = Date.now() - new Date(data.last_run_at as string).getTime();
+    if (idadeMs > FOLLOWUP_CLOCK_STALE_MS) {
+      return {
+        status: "down",
+        latency_ms: Date.now() - t0,
+        error: `última batida há ${Math.round(idadeMs / 1000)}s`,
+        reason: "relogio_parado",
+      };
+    }
+    return { status: "ok", latency_ms: Date.now() - t0 };
+  } catch (e) {
+    return {
+      status: "down",
+      latency_ms: Date.now() - t0,
+      error: e instanceof Error ? e.message : String(e),
+      reason: "resposta_inesperada",
+    };
+  }
+}
+
 /**
  * O segredo interno dos crons também abre o modo verboso. Mesmo contrato de
  * `/api/v1/system/agent`: Bearer, comparação em tempo constante, e segredo vazio
@@ -200,15 +251,21 @@ function semAlvo(check: Check): Check {
 }
 
 export async function GET(req: NextRequest) {
-  const [supabase, redis, waha] = await Promise.all([
+  const [supabase, redis, waha, followupClock] = await Promise.all([
     checkSupabase(),
     checkRedis(),
     checkWaha(),
+    checkFollowupClock(),
   ]);
 
   const verboso = req.nextUrl.searchParams.get("verbose") === "1" && segredoInternoConfere(req);
   const filtrar = verboso ? (c: Check) => c : semAlvo;
-  const checks = { supabase: filtrar(supabase), redis: filtrar(redis), waha: filtrar(waha) };
+  const checks = {
+    supabase: filtrar(supabase),
+    redis: filtrar(redis),
+    waha: filtrar(waha),
+    followup_clock: filtrar(followupClock),
+  };
 
   const anyDown = Object.values(checks).some((c) => c.status === "down");
   const anyDegraded = Object.values(checks).some((c) => c.status === "degraded");

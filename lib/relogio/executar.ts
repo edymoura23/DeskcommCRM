@@ -12,6 +12,7 @@ import {
   type TickDeps,
 } from "@/lib/followup/engine";
 import { enviarTextoFixoPendente } from "@/lib/followup/enviar-texto-fixo";
+import { registrarBatidaDoFollowup } from "@/lib/followup/heartbeat";
 import type { EnrollmentRow } from "@/lib/followup/node-handlers";
 import { createSupabaseSilenceSweepDb, runSilenceSweep } from "@/lib/followup/silence-sweep";
 import { logger } from "@/lib/logger";
@@ -104,6 +105,14 @@ export async function executarTickDoRelogio(): Promise<{
   });
 
   await uma("followup-flow-worker", async () => {
+    // No self-host quem bate isto é o cron dedicado
+    // (app/api/v1/cron/followup-flow-worker/route.ts, chamado pelo container
+    // `scheduler`); no Vercel Hobby — o caso do JBA, sem esse container — é
+    // ESTA função, chamada por `/api/v1/system/relogio/tick`, que é o único
+    // motor batendo. Ver `lib/followup/heartbeat.ts` para o porquê da fonte
+    // única entre os dois motores.
+    registrarBatidaDoFollowup(admin, "relogio");
+
     const deps: TickDeps = {
       db: createSupabaseAdminClient(admin),
       clock: () => new Date(),

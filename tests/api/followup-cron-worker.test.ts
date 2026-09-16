@@ -15,7 +15,13 @@ import { runFollowupTick, createSupabaseAdminClient } from "@/lib/followup/engin
 
 vi.mock("@/lib/env", () => ({ env: { INTERNAL_SECRET: "dev-secret", INTERNAL_CRON_SECRET: "" } }));
 vi.mock("@/lib/audit", () => ({ audit: vi.fn(async () => undefined) }));
-vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn(() => ({ from: vi.fn() })) }));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: vi.fn(() => ({
+    from: vi.fn(() => ({
+      upsert: vi.fn(() => Promise.resolve({ error: null })),
+    })),
+  })),
+}));
 vi.mock("@/lib/followup/engine", () => ({
   runFollowupTick: vi.fn(),
   createSupabaseAdminClient: vi.fn(() => ({})),
