@@ -232,7 +232,7 @@ export async function createLeadHandler(
   // Validate stage belongs to pipeline within active org.
   const { data: stage, error: stageErr } = await supabase
     .from("crm_stages")
-    .select("id, pipeline_id, organization_id")
+    .select("id, pipeline_id, organization_id, is_won")
     .eq("id", input.stage_id)
     .maybeSingle();
 
@@ -249,6 +249,18 @@ export async function createLeadHandler(
       undefined,
       ctx.requestId,
       "Stage não pertence ao pipeline informado.",
+    );
+  }
+
+  // O trigger fecha o lead já no INSERT se a etapa é ganha.
+  // Bloqueie a criação pela IA antes de qualquer efeito comercial.
+  if (ctx.actor.type === "ai_agent" && stage.is_won) {
+    throw new ApiError(
+      403,
+      "forbidden",
+      undefined,
+      ctx.requestId,
+      "Venda ganha exige confirmação da equipe humana.",
     );
   }
 
@@ -556,7 +568,7 @@ export async function moveLeadHandler(
 
   const { data: stage, error: stageErr } = await supabase
     .from("crm_stages")
-    .select("id, pipeline_id, organization_id, name")
+    .select("id, pipeline_id, organization_id, name, is_won")
     .eq("id", input.to_stage_id)
     .maybeSingle();
   if (stageErr) {
@@ -572,6 +584,18 @@ export async function moveLeadHandler(
       undefined,
       ctx.requestId,
       "Move cross-pipeline não é permitido.",
+    );
+  }
+
+  // Identidade do ator, não seu papel RBAC ou o nome/hint da etapa.
+  // Deve ocorrer antes de qualquer mutação, atividade, evento ou auditoria.
+  if (ctx.actor.type === "ai_agent" && stage.is_won) {
+    throw new ApiError(
+      403,
+      "forbidden",
+      undefined,
+      ctx.requestId,
+      "Venda ganha exige confirmação da equipe humana.",
     );
   }
 

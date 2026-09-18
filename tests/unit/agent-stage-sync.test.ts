@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emitLeadActivity } from "@/lib/leads/activity-emitter";
+import type * as ActivityEmitter from "@/lib/leads/activity-emitter";
 import {
   razaoDaMudancaPeloAgente,
   resolveDestinoDoAgente,
@@ -9,7 +10,7 @@ import {
 } from "@/lib/leads/agent-stage-sync";
 
 vi.mock("@/lib/leads/activity-emitter", async (orig) => ({
-  ...(await orig<typeof import("@/lib/leads/activity-emitter")>()),
+  ...(await orig<typeof ActivityEmitter>()),
   emitLeadActivity: vi.fn(async () => ({ ok: true })),
 }));
 
@@ -296,5 +297,32 @@ describe("sincronizaEstagioDoAgente — o evento que aciona automação e follow
   it("o rastro pode falhar sem desfazer o movimento — o card andou, e isso não se retira", async () => {
     const { r } = await sincronizaObservando(cenario({ rpcError: { message: "event_log indisponível" } }));
     expect(r).toMatchObject({ moveu: true, motivo: "movido" });
+  });
+});
+
+describe("W2 — sincronização não confirma venda", () => {
+  it.each([{ stages: clinica }, { stages: ecommerce }])("recusa won independentemente do nome da etapa", ({ stages }) => {
+    expect(resolveDestinoDoAgente(stages, "won", stages[0]!.id))
+      .toEqual({ move: false, motivo: "confirmacao_humana_obrigatoria", passo: "won" });
+  });
+
+  it("barra sincronização antes de consultar ou modificar o banco", async () => {
+    vi.mocked(emitLeadActivity).mockClear();
+    const from = vi.fn();
+    const rpc = vi.fn();
+    const admin = { from, rpc } as unknown as Parameters<typeof sincronizaEstagioDoAgente>[0];
+    const result = await sincronizaEstagioDoAgente(admin, {
+      organizationId: ORG, contactId: CONTATO, passo: "won",
+    });
+    expect(result).toMatchObject({ moveu: false, motivo: "confirmacao_humana_obrigatoria" });
+    expect(from).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+    expect(emitLeadActivity).not.toHaveBeenCalled();
+  });
+
+  it("mantém o mapeamento de perda", () => {
+    expect(resolveDestinoDoAgente([
+      { id: "lost", name: "Encerrado", agent_stage_hint: "lost", is_archived: false },
+    ], "lost", "open")).toEqual({ move: true, stageId: "lost", stageName: "Encerrado" });
   });
 });

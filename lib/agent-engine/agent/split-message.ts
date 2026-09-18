@@ -41,10 +41,32 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
   return bubbles;
 }
 
-/** Divide em sentenças mantendo a pontuação final (. ! ?). */
+/** Pontos internos de URLs/números não são fronteiras de sentença. */
 function splitSentences(text: string): string[] {
-  const out = text.match(/[^.!?]+[.!?]*/g);
-  return (out ?? [text]).map((s) => s.trim()).filter((s) => s !== "");
+  const abbreviations = new Set([
+    "sr", "sra", "srs", "sras", "dr", "dra", "drs", "prof", "profa",
+    "av", "r", "pç", "pca", "ex", "etc", "pag", "pág", "art", "arts",
+    "ltda", "cia", "jr", "me", "nº", "no", "p", "pe", "obs", "ref", "aprox",
+    "rod", "apto", "n",
+  ]);
+  const out: string[] = [];
+  let start = 0;
+  for (const match of text.matchAll(/[.!?…]+(?=\s|$)/g)) {
+    const end = match.index + match[0].length;
+    const token = text.slice(start, match.index).match(/([\p{L}]+)$/u)?.[1]?.toLowerCase();
+    // Preserve a normalização histórica (incluindo nº e pontuação em volta)
+    // e o reconhecimento Unicode do pacote; ambos só vetam fronteira falsa.
+    const historicalToken = (text.slice(start, match.index).match(/(\S+)\s*$/)?.[1] ?? "")
+      .toLowerCase().replace(/[^0-9a-zà-úº]/g, "");
+    if (match[0] === "." && (
+      (token && abbreviations.has(token)) || abbreviations.has(historicalToken)
+    )) continue;
+    out.push(text.slice(start, end).trim());
+    start = end;
+  }
+  const rest = text.slice(start).trim();
+  if (rest) out.push(rest);
+  return out.filter((sentence) => sentence !== "");
 }
 
 /** Última linha de defesa: agrupa palavras até maxChars; palavra atômica > max vai sozinha. */

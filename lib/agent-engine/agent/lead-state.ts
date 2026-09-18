@@ -82,10 +82,10 @@ export type LeadStateUpdateResult =
       transition: { from: LeadStage; to: LeadStage; reason?: string } | null;
       message: string;
     }
-  | { ok: false; error: { code: 'invalid_payload' | 'invalid_transition'; message: string } };
+  | { ok: false; error: { code: 'invalid_payload' | 'invalid_transition' | 'human_sale_required'; message: string } };
 
 function teachInvalidTransition(current: LeadStage, to: LeadStage): LeadStateUpdateResult {
-  const valid = LEAD_STAGE_TRANSITIONS[current];
+  const valid = LEAD_STAGE_TRANSITIONS[current].filter((stage) => stage !== 'won');
   const options =
     valid.length > 0
       ? `A partir de "${current}" os avanços válidos são: ${valid.map((s) => `"${s}"`).join(', ')}.`
@@ -183,6 +183,17 @@ export async function applyLeadStateUpdate(
     return teachInvalidPayload(zodIssuesSummary(parsed.error));
   }
   const input = parsed.data;
+  // Venda ganha exige confirmação humana, inclusive em retries/no-ops.
+  // O vocabulário histórico continua aceitando won para leitura do estado.
+  if (input.stage === 'won') {
+    return {
+      ok: false,
+      error: {
+        code: 'human_sale_required',
+        message: 'Venda ganha exige confirmação da equipe humana. Não marque won; solicite atendimento humano quando necessário.',
+      },
+    };
+  }
 
   const current = await getLeadState(db, ids.tenantId, ids.leadId);
   const currentStage: LeadStage = current?.stage ?? 'new';

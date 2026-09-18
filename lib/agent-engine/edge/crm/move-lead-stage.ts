@@ -20,6 +20,7 @@ import type { LeadStage } from '../../agent/lead-state';
 export type MirrorReason =
   | 'not_configured'
   | 'human_conflict'
+  | 'human_confirmation_required'
   /**
    * O negócio está num funil que este agente não cuida (spec 17 passo 3).
    *
@@ -43,6 +44,7 @@ export type MirrorResult = { ok: true } | { ok: false; reason: MirrorReason; det
 export const MIRROR_WARN_ONLY: ReadonlySet<MirrorReason> = new Set<MirrorReason>([
   'not_configured',
   'human_conflict',
+  'human_confirmation_required',
 ]);
 
 /** Injetável só para teste — em produção é sempre a implementação real. */
@@ -75,6 +77,10 @@ export async function mirrorLeadStageToCrm(
     // mas chamá-lo de `not_configured` mentiria sobre a causa para quem lê o log.
     // Banco fora e escrita falha SÃO incidentes: viram item de inbox no caller.
     const traduz: Record<string, { reason: MirrorReason; detail: string }> = {
+      confirmacao_humana_obrigatoria: {
+        reason: 'human_confirmation_required',
+        detail: 'Venda ganha exige confirmação da equipe humana.',
+      },
       sem_mapeamento: {
         reason: 'not_configured',
         detail: `nenhum estágio do pipeline declara agent_stage_hint = "${input.toStage}"`,

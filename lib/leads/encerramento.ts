@@ -74,6 +74,16 @@ export async function encerraDemanda(
   ctx: HandlerCtx,
   input: EncerraDemandaInput,
 ): Promise<DemandaEncerrada> {
+  // Recusa também retry/no-op: ganhar é confirmação humana, nunca decisão da IA.
+  if (ctx.actor.type === "ai_agent" && input.desfecho === "won") {
+    throw new ApiError(
+      403,
+      "forbidden",
+      undefined,
+      ctx.requestId,
+      "Venda ganha exige confirmação da equipe humana.",
+    );
+  }
   if (input.desfecho === "lost" && !input.motivo?.trim()) {
     throw new ApiError(
       422,

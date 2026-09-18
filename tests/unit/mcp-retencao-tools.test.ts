@@ -640,7 +640,7 @@ describe("crm_close_demand", () => {
     expect(cap.updates).toHaveLength(0);
   });
 
-  it("funil sem estágio terminal vira ensino, não exceção", async () => {
+  it("humano autorizado: funil sem estágio terminal vira ensino, não exceção", async () => {
     const cap = novasCapturas();
     const semEstagio: Resolver = (c) => {
       if (c.table === "crm_leads" && c.terminal === "maybeSingle") return { data: leadAberto, error: null };
@@ -649,7 +649,11 @@ describe("crm_close_demand", () => {
 
     const res = (await crmCloseDemand.handler(
       { lead_id: LEAD, outcome: "won", reason: undefined },
-      ctxDe(semEstagio, cap),
+      {
+        ...ctxDe(semEstagio, cap),
+        role: "manager",
+        actor: { type: "user", id: "usuario-fixture", role: "manager" },
+      },
     )) as { encerrado: boolean; motivo: string };
 
     expect(res.encerrado).toBe(false);

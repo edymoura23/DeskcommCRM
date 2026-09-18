@@ -32,7 +32,8 @@ export type DestinoDoAgente =
    */
   | { move: false; motivo: "sem_mapeamento"; passo: string }
   /** O agente está no passo que o negócio já ocupa: nada a fazer, e não é falha. */
-  | { move: false; motivo: "ja_esta_la"; passo: string };
+  | { move: false; motivo: "ja_esta_la"; passo: string }
+  | { move: false; motivo: "confirmacao_humana_obrigatoria"; passo: string };
 
 /**
  * Para onde o negócio vai quando o agente avança para `passo`.
@@ -52,6 +53,9 @@ export function resolveDestinoDoAgente(
   passo: string,
   estagioAtualId: string,
 ): DestinoDoAgente {
+  if (passo === "won") {
+    return { move: false, motivo: "confirmacao_humana_obrigatoria", passo };
+  }
   const alvo = estagios.find((e) => !e.is_archived && e.agent_stage_hint === passo);
   if (!alvo) return { move: false, motivo: "sem_mapeamento", passo };
   if (alvo.id === estagioAtualId) return { move: false, motivo: "ja_esta_la", passo };
@@ -96,6 +100,7 @@ export interface ResultadoDaSincronizacao {
    */
   motivo:
     | "movido"
+    | "confirmacao_humana_obrigatoria"
     | "sem_mapeamento"
     | "ja_esta_la"
     | "sem_negocio"
@@ -148,6 +153,14 @@ export async function sincronizaEstagioDoAgente(
     escopoDeFunis?: readonly string[];
   },
 ): Promise<ResultadoDaSincronizacao> {
+  // Backstop: nem callers legados podem fechar uma venda pelo assistente.
+  if (input.passo === "won") {
+    return {
+      moveu: false,
+      motivo: "confirmacao_humana_obrigatoria",
+      detalhe: "Venda ganha exige confirmação da equipe humana.",
+    };
+  }
   // ⚠️ O erro do SELECT É LIDO, e isso não é zelo: o supabase-js NÃO LANÇA em
   // falha de rede — devolve { data: null, error }. Descartar o erro faria o
   // banco fora virar `candidatos = []` → "sem_negocio", ou seja, uma queda do

@@ -24,10 +24,10 @@ describe('mirrorLeadStageToCrm', () => {
     });
   });
 
-  it('estágio já ocupado é sucesso, não falha', async () => {
+  it('estágio comum já ocupado é sucesso, não falha', async () => {
     const sync = vi.fn().mockResolvedValue({ moveu: false, motivo: 'ja_esta_la' });
     const r = await mirrorLeadStageToCrm(
-      db, cfg as never, { tenantId: 'o', leadId: 'c', toStage: 'won' }, { sync },
+      db, cfg as never, { tenantId: 'o', leadId: 'c', toStage: 'qualifying' }, { sync },
     );
     expect(r).toEqual({ ok: true });
   });
@@ -91,5 +91,24 @@ describe('mirrorLeadStageToCrm', () => {
       db, cfg as never, { tenantId: 'o', leadId: 'c', toStage: 'won' }, { sync },
     );
     expect(r).toMatchObject({ ok: false, reason: 'crm_error' });
+  });
+});
+
+describe('W2 — espelho com sincronização real', () => {
+  it('traduz recusa humana como regra de negócio, sem consulta ou erro de CRM', async () => {
+    const from = vi.fn();
+    const rpc = vi.fn();
+    const realCfg = { supabase: { from, rpc } } as unknown as Parameters<typeof mirrorLeadStageToCrm>[1];
+    for (let retry = 0; retry < 2; retry++) {
+      expect(await mirrorLeadStageToCrm(db, realCfg, {
+        tenantId: 'org-fixture', leadId: 'contact-fixture', toStage: 'won',
+      })).toEqual({
+        ok: false, reason: 'human_confirmation_required',
+        detail: 'Venda ganha exige confirmação da equipe humana.',
+      });
+    }
+    expect(MIRROR_WARN_ONLY.has('human_confirmation_required')).toBe(true);
+    expect(from).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
   });
 });
