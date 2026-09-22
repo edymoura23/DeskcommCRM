@@ -15,10 +15,14 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTemplate } from "./send-template";
+import { resolveMetaCreds } from "./credentials";
 
 export interface SendTemplateForSessionInput {
   organizationId: string;
+  /** phone_number_id da sessão dona do template e da credencial. */
+  sessionRef: string;
   /** Destinatário em dígitos E.164, já resolvido pelo adapter. */
   to: string;
   name: string;
@@ -52,10 +56,18 @@ export async function sendTemplateForSession(
 
   if (error) throw new Error(`template_lookup_failed: ${error.message}`);
 
+  // A RPC de decifragem é concedida somente a service_role. O escopo continua
+  // vindo da organização e da sessão já validadas pelo handler.
+  const creds = await resolveMetaCreds(createAdminClient(), {
+    organizationId: input.organizationId,
+    phoneNumberId: input.sessionRef,
+  });
+  if (!creds) throw new Error("meta_not_configured: sessão sem credencial utilizável");
+
   const resultado = await sendTemplate({
-    phoneNumberId: process.env.META_PHONE_NUMBER_ID ?? "",
-    token: process.env.META_SYSTEM_USER_TOKEN ?? "",
-    graphVersion: process.env.META_GRAPH_VERSION ?? "v22.0",
+    phoneNumberId: creds.phoneNumberId,
+    token: creds.token,
+    graphVersion: creds.graphVersion,
     to: input.to,
     binding: {
       name: input.name,

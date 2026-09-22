@@ -147,6 +147,23 @@ ver, tela para mudar, e caminho visível de falha.**
 
 ## Enforcement
 
+### Custódia de saída e redrive
+
+`queued` significa somente que o CRM persistiu a intenção. Não significa que o
+provider a aceitou, e a interface deve mostrá-la como **Aguardando envio**. O
+estado `sent` exige identificador externo verificável (`wamid` na Meta Cloud).
+
+O redrive resolve sessão, destinatário e credencial pelo adapter da própria
+mensagem, sempre com `organization_id`. Filas criadas pelo contrato transversal
+carregam `metadata.transport_redrive_contract = "adapter_v1"`; esse marcador é
+a fronteira explícita de ativação e impede consumo retroativo de filas Meta
+anteriores ao release. A compatibilidade histórica do redrive WAHA permanece.
+
+Uma linha é reclamada atomicamente de `queued` para `sending`. Sucesso confirmado
+grava `sent` + `external_id` e reconcilia o ledger; falta de credencial volta a
+`queued`. Erro Meta sem aceite verificável termina em `failed`, evitando retry
+cego depois de uma resposta ambígua do provider.
+
 | Camada | Mecanismo | Efeito |
 |---|---|---|
 | Lint | `scripts/lint-channels.ts` | nome de provider fora de `lib/channels/` reprova |

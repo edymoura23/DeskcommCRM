@@ -2946,11 +2946,25 @@ async function executarTurnoDoAgente(
     );
   }
 
+  const queued = outcomes.find((o) => o.kind === 'queued');
+  if (queued !== undefined) {
+    await applySendOutcome(
+      pool,
+      queued,
+      { jobId: job.id, workerId: ctx.workerId, tenantId, leadId },
+      { queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs },
+    );
+    await mcpCleanup?.();
+    throw new JobSettledError(
+      'turno aguardando submissão ao canal — job reagendado sem contabilizar mensagem como enviada',
+    );
+  }
+
   await mcpCleanup?.();
 
   runLog.info('turno do agente concluído', {
     kind: job.kind,
-    messages_sent: outcomes.length,
+    messages_sent: outcomes.filter((o) => o.kind === 'sent' || o.kind === 'already_sent').length,
     model: turn.model,
   });
 }

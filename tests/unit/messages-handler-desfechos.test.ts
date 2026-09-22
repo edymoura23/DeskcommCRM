@@ -33,7 +33,16 @@ const signedUrl = vi.fn<() => Promise<{ data: { signedUrl: string } | null; erro
   async () => ({ data: { signedUrl: 'https://signed.example/a.jpg' }, error: null }),
 );
 vi.mock('@/lib/supabase/admin', () => ({
-  createAdminClient: () => ({ storage: { from: () => ({ createSignedUrl: signedUrl }) } }),
+  createAdminClient: () => ({
+    storage: { from: () => ({ createSignedUrl: signedUrl }) },
+    from: () => {
+      const chain: Record<string, unknown> = { maybeSingle: async () => ({ data: null, error: null }) };
+      chain.select = () => chain;
+      chain.eq = () => chain;
+      chain.is = () => chain;
+      return chain;
+    },
+  }),
 }));
 // Audit é fire-and-forget e escreve em outra tabela; fora do escopo dos desfechos.
 vi.mock('@/lib/audit', () => ({ audit: vi.fn(async () => {}) }));
@@ -72,7 +81,8 @@ function conversationRow(shape: ConversationShape = {}): Row {
             // `provider` sai do banco desde a migration 0087 — o handler não
             // supõe mais o canal, então a linha falsa também não pode supor.
             provider: shape.provider ?? 'waha',
-            waha_session_name: 'default',
+            waha_session_name: shape.provider === 'meta_cloud' ? null : 'default',
+            meta_phone_number_id: shape.provider === 'meta_cloud' ? '1103328999528818' : null,
             status: shape.sessionStatus ?? 'WORKING',
             archived_at: shape.archivedAt ?? null,
           },
@@ -130,6 +140,13 @@ function makeSupabase(
           maybeSingle: async () => ({ data: templateRow, error: null }),
         };
         return { select: () => cadeia };
+      }
+      if (table === 'channel_sessions') {
+        const chain: Record<string, unknown> = { maybeSingle: async () => ({ data: null, error: null }) };
+        chain.select = () => chain;
+        chain.eq = () => chain;
+        chain.is = () => chain;
+        return chain;
       }
       if (table === 'messages') {
         return {
@@ -203,6 +220,7 @@ describe('sendMessageHandler — os 6 desfechos do envio', () => {
 
     expect(msg.status).toBe('queued');
     expect((msg.metadata as Record<string, unknown>).queued_reason).toBe('waha_not_configured');
+    expect((msg.metadata as Record<string, unknown>).transport_redrive_contract).toBe('adapter_v1');
     expect(msg.error_code).toBeNull();
     expect(msg.external_id).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();

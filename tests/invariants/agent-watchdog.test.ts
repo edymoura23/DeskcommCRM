@@ -1,5 +1,5 @@
 import http from "node:http";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import pg from "pg";
 
 import {
@@ -137,6 +137,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await new Promise<void>((resolve) => wahaMock.close(() => resolve()));
   await pool.end();
 });
@@ -173,6 +174,8 @@ describe("4A-2 — watchdog reconcilia o espelho e reenvia queued", () => {
   });
 
   it("redrive: a queued sai sent COM external_id (shape NOWEB parseado)", async () => {
+    vi.stubEnv("WAHA_API_BASE_URL", `http://127.0.0.1:${wahaPort}`);
+    vi.stubEnv("WAHA_API_KEY", "test-key");
     const redriven = await redriveQueued(pool, watchdogCfg(), log);
     expect(redriven).toBe(1);
 
@@ -187,7 +190,7 @@ describe("4A-2 — watchdog reconcilia o espelho e reenvia queued", () => {
       "select status, external_id, metadata->>'redrive' as redrive from messages where id = $1",
       [QUEUED_MSG],
     );
-    expect(rows[0]).toMatchObject({ status: "sent", external_id: NOWEB_ID, redrive: "watchdog" });
+    expect(rows[0]).toMatchObject({ status: "sent", external_id: NOWEB_ID, redrive: "adapter_v1" });
   });
 
   it("idempotência: segundo tick não reenvia (nada mais queued)", async () => {

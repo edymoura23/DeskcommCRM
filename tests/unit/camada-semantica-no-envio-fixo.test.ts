@@ -37,13 +37,14 @@
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type * as FollowupTurnModule from "@/lib/agent-engine/agent/followup-turn";
 import type { JobRow } from "@/lib/agent-engine/queue/queue";
 
 // O parâmetro é DECLARADO para que `mock.calls[0][0]` exista para o typechecker:
 // sem ele o vitest infere a tupla vazia e o `pnpm typecheck` reprova o arquivo.
 const runBeforeSend = vi.fn(async (_args: Record<string, unknown>) => ({
   status: "sent",
-  outcome: {},
+  outcome: { kind: "sent" },
   trace: [],
 }));
 vi.mock("@/lib/agent-engine/guardrails/before-send", () => ({ runBeforeSend }));
@@ -65,9 +66,8 @@ vi.mock("@/lib/agent-engine/agent/reentry-template", () => ({
   pickReentryVariant: vi.fn(() => "oi, tudo bem?"),
 }));
 
-vi.mock("@/lib/agent-engine/edge/crm/send-message", () => ({
-  applySendOutcome: vi.fn(async () => undefined),
-}));
+const applySendOutcome = vi.fn(async () => undefined);
+vi.mock("@/lib/agent-engine/edge/crm/send-message", () => ({ applySendOutcome }));
 
 const ORG = "org-1";
 const LEAD = "lead-1";
@@ -123,7 +123,7 @@ function deps() {
   } as never;
 }
 
-let criarHandler: typeof import("@/lib/agent-engine/agent/followup-turn").createFollowupTurnHandler;
+let criarHandler: typeof FollowupTurnModule.createFollowupTurnHandler;
 
 // Fora do relógio do `it()` pelo mesmo motivo de `followup-canal-arquivado`:
 // o transform do grafo do agent-engine seria cronometrado como asserção.
@@ -134,7 +134,9 @@ beforeAll(async () => {
 }, 60_000);
 
 beforeEach(() => {
-  runBeforeSend.mockClear();
+  runBeforeSend.mockReset();
+  runBeforeSend.mockResolvedValue({ status: "sent", outcome: { kind: "sent" }, trace: [] });
+  applySendOutcome.mockClear();
 });
 
 function classificadorRecebido(): boolean {
@@ -176,6 +178,38 @@ describe("camada semântica no envio fixo — a escolha da organização alcanç
 
     expect(runBeforeSend).toHaveBeenCalledTimes(1);
     expect(classificadorRecebido()).toBe(false);
+  });
+
+  it("queued não vira conclusão: reage o job e interrompe o follow-up", async () => {
+    runBeforeSend.mockResolvedValueOnce({
+      status: "sent",
+      outcome: { kind: "queued", idempotencyKey: "ledger-1", crmMessageId: "msg-1" },
+      trace: [],
+    });
+    const { pool } = fakePool(true);
+
+    await expect(criarHandler(deps())(job({ mode: "template" }), pool, ctx)).rejects.toThrow(
+      /aguardando submissão/i,
+    );
+    expect(applySendOutcome).toHaveBeenCalledWith(
+      pool,
+      expect.objectContaining({ kind: "queued" }),
+      expect.objectContaining({ jobId: "job-1", tenantId: ORG }),
+      expect.any(Object),
+    );
+  });
+
+  it("failed não é contado como mensagem enviada", async () => {
+    runBeforeSend.mockResolvedValueOnce({
+      status: "sent",
+      outcome: { kind: "failed", idempotencyKey: "ledger-1", crmMessageId: "msg-1" },
+      trace: [],
+    });
+    const { pool } = fakePool(true);
+
+    await expect(criarHandler(deps())(job({ mode: "template" }), pool, ctx)).rejects.toThrow(
+      /marcou o envio como failed/i,
+    );
   });
 
   it("controle positivo: a cadeia foi mesmo exercitada, com corpo e destino", async () => {

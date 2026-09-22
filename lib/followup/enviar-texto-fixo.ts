@@ -72,6 +72,31 @@ export async function enviarTextoFixoPendente(
         await admin.from("job_queue").update({ status: "done" }).eq("id", job.id);
         continue;
       }
+
+      // O redrive pode ter submetido a linha enquanto este job aguardava em
+      // pending. Reconciliar pela identidade do job evita criar uma segunda
+      // mensagem no tick seguinte.
+      const { data: anterior, error: anteriorErr } = await admin
+        .from("messages")
+        .select("id, status")
+        .eq("organization_id", job.organization_id as string)
+        .contains("metadata", { followup_job_id: job.id })
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (anteriorErr) throw new Error(anteriorErr.message);
+      if (anterior && ["sent", "delivered", "read"].includes(anterior.status)) {
+        await completeTurnForEnrollment(ponte, job.organization_id as string, enrollmentId, nodeId, {
+          kind: "sent",
+        });
+        await admin.from("job_queue").update({ status: "done" }).eq("id", job.id);
+        enviados++;
+        continue;
+      }
+      if (anterior && ["queued", "sending"].includes(anterior.status)) {
+        await admin.from("job_queue").update({ status: "pending" }).eq("id", job.id);
+        continue;
+      }
       const sessionId = await sessaoProntaParaEnvio(admin, job.organization_id as string);
       if (!sessionId) {
         logger.warn("[dev.pipeline] sem sessão de canal — job volta pra pending");
@@ -84,15 +109,28 @@ export async function enviarTextoFixoPendente(
         contactId,
         sessionId,
       );
-      await sendMessageHandler(
+      const mensagem = await sendMessageHandler(
         admin,
         {
           organization_id: job.organization_id as string,
           actor: { type: "webhook_source", id: enrollmentId },
           requestId: `followup:${job.id}`,
         },
-        { conversation_id: conversationId, type: "text", body },
+        {
+          conversation_id: conversationId,
+          type: "text",
+          body,
+          metadata: { followup_job_id: job.id },
+        },
       );
+      if (mensagem.status === "queued") {
+        logger.warn("[dev.pipeline] mensagem aguardando submissão — job volta para pending");
+        await admin.from("job_queue").update({ status: "pending" }).eq("id", job.id);
+        continue;
+      }
+      if (mensagem.status === "failed") {
+        throw new Error(`mensagem_failed: ${mensagem.error_code ?? "provider_error"}`);
+      }
       enviados++;
       try {
         await completeTurnForEnrollment(ponte, job.organization_id as string, enrollmentId, nodeId, {

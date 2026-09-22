@@ -143,5 +143,13 @@ export async function resolveMetaCreds(
   admin: SupabaseClient,
   lookup: MetaCredsLookup,
 ): Promise<MetaCredentials | null> {
-  return (await metaCredsForPhoneNumberId(admin, lookup)) ?? metaCredsFromEnv();
+  const session = await metaCredsForPhoneNumberId(admin, lookup);
+  if (session) return session;
+
+  // O env é compatibilidade para instalação de número único, não uma conta
+  // coringa. Só pode atender a MESMA sessão pedida pelo chamador. Sem esta
+  // igualdade, uma sessão sem token pode enviar pela credencial de outra
+  // organização configurada no processo.
+  const env = metaCredsFromEnv();
+  return env?.phoneNumberId === lookup.phoneNumberId ? env : null;
 }

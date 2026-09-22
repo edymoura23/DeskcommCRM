@@ -464,6 +464,9 @@ export async function sendMessageHandler(
     metadata: {
       ...(input.metadata ?? {}),
       ...(ctx.actor.type === "ai_agent" ? { ai_actor_id: ctx.actor.id } : {}),
+      // Só filas criadas pelo contrato novo podem ser consumidas pelo redrive
+      // transversal. Mensagens históricas não recebem o marcador por retrofit.
+      transport_redrive_contract: "adapter_v1",
     },
   };
 
@@ -604,6 +607,7 @@ export async function sendMessageHandler(
             ).externalId
           : await sendTemplateForSession(supabase, {
               organizationId: ctx.organization_id,
+              sessionRef: resolveSessionRef(c.channel_sessions),
               to: chatId,
               name: input.template_name ?? "",
               language: input.template_language ?? "",
@@ -673,6 +677,9 @@ export async function sendMessageHandler(
           body: input.body ?? "",
           replyToExternalId: citada?.external_id ?? null,
         }));
+      }
+      if (!externalId) {
+        throw new Error(`${adapter.codes.sendFailed}: provider não confirmou external_id`);
       }
       await removerEcoDoProprioEnvio(
         supabase,

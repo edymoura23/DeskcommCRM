@@ -304,25 +304,22 @@ export async function startWorker(
     loopsAbort.signal,
   );
 
-  // Watchdog de sessão (4A-2): reconcilia channel_sessions×WAHA + redrive de
-  // queued. Liga só com as credenciais do WAHA no env (sem elas: warn + off).
-  const sessionWatchdogLoop =
-    env.WAHA_API_BASE_URL !== undefined && env.WAHA_API_KEY !== undefined
-      ? runSessionWatchdogLoop(
-          pool,
-          {
-            wahaBaseUrl: env.WAHA_API_BASE_URL,
-            wahaApiKey: env.WAHA_API_KEY,
-            intervalMs: env.WATCHDOG_INTERVAL_MS,
-            redriveMinAgeMs: env.WATCHDOG_REDRIVE_MIN_AGE_MS,
-            redriveBatchSize: env.WATCHDOG_REDRIVE_BATCH_SIZE,
-            redriveSpacingMs: env.WATCHDOG_REDRIVE_SPACING_MS,
-          },
-          log,
-          loopsAbort.signal,
-        )
-      : (log.warn('watchdog de sessão OFF — WAHA_API_BASE_URL/WAHA_API_KEY ausentes no env', {}),
-        Promise.resolve());
+  // O redrive pelo seam de adapters roda para qualquer provider. A parte de
+  // reconciliação/retomada do WAHA fica condicional às credenciais desse
+  // transporte, sem desligar o resgate Meta por ausência de env WAHA.
+  const sessionWatchdogLoop = runSessionWatchdogLoop(
+    pool,
+    {
+      ...(env.WAHA_API_BASE_URL !== undefined ? { wahaBaseUrl: env.WAHA_API_BASE_URL } : {}),
+      ...(env.WAHA_API_KEY !== undefined ? { wahaApiKey: env.WAHA_API_KEY } : {}),
+      intervalMs: env.WATCHDOG_INTERVAL_MS,
+      redriveMinAgeMs: env.WATCHDOG_REDRIVE_MIN_AGE_MS,
+      redriveBatchSize: env.WATCHDOG_REDRIVE_BATCH_SIZE,
+      redriveSpacingMs: env.WATCHDOG_REDRIVE_SPACING_MS,
+    },
+    log,
+    loopsAbort.signal,
+  );
 
   // Circuito de saúde do número (block/response rate → hold).
   const healthLoop = runHealthLoop(

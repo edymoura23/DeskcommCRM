@@ -686,9 +686,13 @@ async function sendFixedOutbound(
   switch (outcome.kind) {
     case 'sent':
     case 'already_sent':
-    case 'queued':
       runLog.info('envio fixo concluído', { kind: outcome.kind });
       return true;
+    case 'queued':
+      await applySendOutcome(pool, outcome, { jobId: job.id, workerId: ctx.workerId, tenantId, leadId }, {
+        queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs,
+      });
+      throw new JobSettledError('envio fixo aguardando submissão ao canal — job reagendado');
     case 'blocked':
       await applySendOutcome(pool, outcome, { jobId: job.id, workerId: ctx.workerId, tenantId, leadId }, {
         queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs,

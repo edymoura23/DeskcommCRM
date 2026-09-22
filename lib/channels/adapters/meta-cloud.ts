@@ -96,29 +96,11 @@ export const metaCloudAdapter: ChannelAdapter = {
     return digits.length > 0 ? digits : null;
   },
 
-  /**
-   * DÍVIDA CONHECIDA, deixada de propósito — não é descuido.
-   *
-   * A credencial deste canal também pode viver na SESSÃO (a tela de "Conectar
-   * canal oficial" grava `meta_token_encrypted` desde a 0118), e `isConfigured`
-   * é síncrono: não consulta o banco. Numa instalação que conectou pela tela e
-   * não escreveu `.env`, isto devolve `false`, e o handler (`_handler.ts:370`)
-   * grava `queued` com `queued_reason: meta_not_configured` sem nunca chamar
-   * `send` — mensagem parada no inbox, sem erro, com o canal conectado.
-   *
-   * O canal intermediado JÁ passou por isso e resolveu devolvendo `true` e
-   * fazendo o `send` lançar (ver `adapters/zernio.ts`). O mesmo conserto cabe
-   * aqui, mas ele muda um contrato com dois testes explícitos
-   * (`tests/unit/channel-adapter-meta.test.ts`) cuja justificativa escrita é
-   * "mesmo contrato do outro canal" — justificativa que o fork já não sustenta.
-   *
-   * Trocar contrato testado exige uma mudança própria, com os testes revistos de
-   * propósito e não de passagem. Fica registrado aqui para quem for fazê-la.
-   */
+  /** A verificação real exige organização + sessão e por isso ocorre em send(). */
   isConfigured(): boolean {
-    // Síncrono por contrato. Com credencial na sessão, quem confirma é o `send`
-    // (async) — ver o comentário acima.
-    return metaCredsFromEnv() !== null;
+    // Credencial Meta pode viver na sessão e esta interface é síncrona. A
+    // verificação autoritativa ocorre em send(), já com organização + sessão.
+    return true;
   },
 
   /**
@@ -192,9 +174,7 @@ export const metaCloudAdapter: ChannelAdapter = {
       organizationId: envelope.organizationId,
       phoneNumberId: envelope.sessionRef,
     });
-    // Mesmo contrato do outro canal: sem credencial é NOOP, não exceção. A UI mostra
-    // o banner de "canal não conectado"; transformar em erro mudaria comportamento.
-    if (!creds) return { externalId: null };
+    if (!creds) throw new Error("meta_not_configured: sessão sem credencial utilizável");
 
     const corpo =
       contactPayload(envelope) ??
@@ -230,6 +210,10 @@ export const metaCloudAdapter: ChannelAdapter = {
       throw new Error(`meta_${body.error?.code ?? res.status}: ${detalhe}`);
     }
 
-    return { externalId: body.messages?.[0]?.id ?? null };
+    const externalId = body.messages?.[0]?.id?.trim() || null;
+    if (!externalId) {
+      throw new Error("meta_missing_external_id: Graph API não confirmou o wamid");
+    }
+    return { externalId };
   },
 };

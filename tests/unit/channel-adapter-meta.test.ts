@@ -93,10 +93,10 @@ describe("adapter meta_cloud — endereçamento", () => {
 });
 
 describe("adapter meta_cloud — configuração", () => {
-  it("sem credencial NÃO está configurado", () => {
+  it("aceita tentativa síncrona porque a credencial pode estar na sessão", () => {
     vi.stubEnv("META_PHONE_NUMBER_ID", "");
     vi.stubEnv("META_SYSTEM_USER_TOKEN", "");
-    expect(a().isConfigured()).toBe(false);
+    expect(a().isConfigured()).toBe(true);
   });
 
   it("com credencial está configurado", () => {
@@ -104,12 +104,16 @@ describe("adapter meta_cloud — configuração", () => {
     expect(a().isConfigured()).toBe(true);
   });
 
-  it("não configurado é NOOP no envio, nunca exceção", async () => {
+  it("sem credencial escopada lança meta_not_configured sem chamar a Graph", async () => {
     // Mesmo contrato do outro canal: a UI mostra banner, o handler grava `queued`.
     vi.stubEnv("META_PHONE_NUMBER_ID", "");
     vi.stubEnv("META_SYSTEM_USER_TOKEN", "");
-    const r = await a().send({ organizationId: ORG, sessionRef: "x", to: "5531999", kind: "text", body: "oi" });
-    expect(r).toEqual({ externalId: null });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      a().send({ organizationId: ORG, sessionRef: "1103328999528818", to: "5531999", kind: "text", body: "oi" }),
+    ).rejects.toThrow(/meta_not_configured/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("os códigos carregam o nome do provider — por isso vivem no adapter", () => {
@@ -122,7 +126,7 @@ describe("adapter meta_cloud — envio", () => {
   it("texto vai como type:text e o phone_number_id entra na URL, não no corpo", async () => {
     configurar();
     const spy = stubFetch({ messages: [{ id: "wamid.T" }] });
-    const r = await a().send({ organizationId: ORG, sessionRef: "ignorado", to: "5531998966398", kind: "text", body: "oi" });
+    const r = await a().send({ organizationId: ORG, sessionRef: "1103328999528818", to: "5531998966398", kind: "text", body: "oi" });
 
     expect(r).toEqual({ externalId: "wamid.T" });
     const [url, init] = spy.mock.calls[0]!;
@@ -136,7 +140,7 @@ describe("adapter meta_cloud — envio", () => {
     configurar();
     const spy = stubFetch({ messages: [{ id: "wamid.A" }] });
     await a().send({
-      organizationId: ORG, sessionRef: "x", to: "5531998966398", kind: "audio",
+      organizationId: ORG, sessionRef: "1103328999528818", to: "5531998966398", kind: "audio",
       media: { url: "https://x/a.ogg", mime: "audio/ogg" },
     });
     const corpo = JSON.parse(spy.mock.calls[0]![1].body as string) as {
@@ -150,7 +154,7 @@ describe("adapter meta_cloud — envio", () => {
     configurar();
     const spy = stubFetch({ messages: [{ id: "wamid.I" }] });
     await a().send({
-      organizationId: ORG, sessionRef: "x", to: "5531", kind: "image",
+      organizationId: ORG, sessionRef: "1103328999528818", to: "5531", kind: "image",
       media: { url: "https://x/a.jpg", mime: "image/jpeg", caption: "olha" },
     });
     expect(JSON.parse(spy.mock.calls[0]![1].body as string).image).toEqual({
@@ -159,7 +163,7 @@ describe("adapter meta_cloud — envio", () => {
 
     const spy2 = stubFetch({ messages: [{ id: "wamid.D" }] });
     await a().send({
-      organizationId: ORG, sessionRef: "x", to: "5531", kind: "document",
+      organizationId: ORG, sessionRef: "1103328999528818", to: "5531", kind: "document",
       media: { url: "https://x/a.pdf", mime: "application/pdf", filename: "contrato.pdf" },
     });
     expect(JSON.parse(spy2.mock.calls[0]![1].body as string).document).toMatchObject({
@@ -180,7 +184,7 @@ describe("adapter meta_cloud — envio", () => {
       false,
     );
     await expect(
-      a().send({ organizationId: ORG, sessionRef: "x", to: "+5531", kind: "text", body: "oi" }),
+      a().send({ organizationId: ORG, sessionRef: "1103328999528818", to: "+5531", kind: "text", body: "oi" }),
     ).rejects.toThrow(/131009.*formato inválido/);
   });
 
@@ -189,7 +193,7 @@ describe("adapter meta_cloud — envio", () => {
     const spy = stubFetch({ messages: [{ id: "wamid.C" }] });
     const r = await a().send({
       organizationId: "org-1",
-      sessionRef: "ignorado",
+      sessionRef: "1103328999528818",
       to: "5531998966398",
       kind: "contact",
       contact: {
@@ -210,11 +214,12 @@ describe("adapter meta_cloud — envio", () => {
     expect(corpo.contacts[0]?.phones[0]?.wa_id).toBe("5511999887766");
   });
 
-  it("resposta sem id devolve externalId null, sem estourar", async () => {
+  it("resposta sem wamid não pode ser classificada como sent", async () => {
     configurar();
     stubFetch({ messages: [] });
-    const r = await a().send({ organizationId: ORG, sessionRef: "x", to: "5531", kind: "text", body: "oi" });
-    expect(r).toEqual({ externalId: null });
+    await expect(
+      a().send({ organizationId: ORG, sessionRef: "1103328999528818", to: "5531", kind: "text", body: "oi" }),
+    ).rejects.toThrow(/meta_missing_external_id/);
   });
 });
 
@@ -232,14 +237,27 @@ describe("credencial por sessão — o que destrava multi-tenant", () => {
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer token-da-sessao");
   });
 
-  it("sem token na sessão, cai no env — instalação de número único segue funcionando", async () => {
+  it("sem token na sessão, cai no env somente para o mesmo phone_number_id", async () => {
     configurar();
     sessaoNoBanco.token = null;
     const spy = stubFetch({ messages: [{ id: "wamid.E" }] });
 
-    await a().send({ organizationId: ORG, sessionRef: "qualquer", to: "5531", kind: "text", body: "oi" });
+    await a().send({ organizationId: ORG, sessionRef: "1103328999528818", to: "5531", kind: "text", body: "oi" });
 
     const [, init] = spy.mock.calls[0]!;
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
   });
+
+  it("não usa o env de outro número/tenant como fallback", async () => {
+    configurar();
+    sessaoNoBanco.token = null;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      a().send({ organizationId: "outra-org", sessionRef: "outro-pnid", to: "5531", kind: "text", body: "oi" }),
+    ).rejects.toThrow(/meta_not_configured/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
 });

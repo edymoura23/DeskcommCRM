@@ -43,6 +43,7 @@ export function MessageBubble({ message, debugCitations, onResponder, citada }: 
   const isOutbound = message.direction === "outbound";
   const time = format(new Date(message.sent_at), "HH:mm", { locale: localeDaData });
   const isFailed = message.status === "failed";
+  const isQueued = isOutbound && message.status === "queued";
   const hasMedia = Boolean(message.media_url || message.media_storage_path);
   const isContact = message.type === "contact";
   // Figurinha sem caption: sem moldura de bolha (padrão WhatsApp).
@@ -208,6 +209,11 @@ export function MessageBubble({ message, debugCitations, onResponder, citada }: 
             <CitationButton citations={citations} messageId={message.id} />
           )}
           {isOutbound && !isFailed && <AckIndicator status={message.status} t={t} />}
+          {isQueued && (
+            <span className="font-semibold" title={t("A mensagem ainda não foi submetida ao canal")}>
+              {t("Aguardando envio")}
+            </span>
+          )}
           {isFailed && (
             // Provider local: o painel do inbox não tem TooltipProvider ancestral e
             // este Tooltip só monta em mensagem failed — sem o provider, abrir uma
