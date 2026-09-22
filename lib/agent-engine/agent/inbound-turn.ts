@@ -2950,7 +2950,11 @@ async function executarTurnoDoAgente(
   if (queued !== undefined) {
     await applySendOutcome(
       pool,
-      queued,
+      {
+        kind: 'queued',
+        idempotencyKey: queued.idempotencyKey,
+        crmMessageId: queued.messageId,
+      },
       { jobId: job.id, workerId: ctx.workerId, tenantId, leadId },
       { queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs },
     );

@@ -689,9 +689,16 @@ async function sendFixedOutbound(
       runLog.info('envio fixo concluído', { kind: outcome.kind });
       return true;
     case 'queued':
-      await applySendOutcome(pool, outcome, { jobId: job.id, workerId: ctx.workerId, tenantId, leadId }, {
-        queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs,
-      });
+      await applySendOutcome(
+        pool,
+        {
+          kind: 'queued',
+          idempotencyKey: outcome.idempotencyKey,
+          crmMessageId: outcome.messageId,
+        },
+        { jobId: job.id, workerId: ctx.workerId, tenantId, leadId },
+        { queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs },
+      );
       throw new JobSettledError('envio fixo aguardando submissão ao canal — job reagendado');
     case 'blocked':
       await applySendOutcome(pool, outcome, { jobId: job.id, workerId: ctx.workerId, tenantId, leadId }, {

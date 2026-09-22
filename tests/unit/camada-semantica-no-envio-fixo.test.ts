@@ -183,7 +183,7 @@ describe("camada semântica no envio fixo — a escolha da organização alcanç
   it("queued não vira conclusão: reage o job e interrompe o follow-up", async () => {
     runBeforeSend.mockResolvedValueOnce({
       status: "sent",
-      outcome: { kind: "queued", idempotencyKey: "ledger-1", crmMessageId: "msg-1" },
+      outcome: { kind: "queued", idempotencyKey: "ledger-1", messageId: "msg-1" },
       trace: [],
     });
     const { pool } = fakePool(true);
@@ -193,7 +193,7 @@ describe("camada semântica no envio fixo — a escolha da organização alcanç
     );
     expect(applySendOutcome).toHaveBeenCalledWith(
       pool,
-      expect.objectContaining({ kind: "queued" }),
+      { kind: "queued", idempotencyKey: "ledger-1", crmMessageId: "msg-1" },
       expect.objectContaining({ jobId: "job-1", tenantId: ORG }),
       expect.any(Object),
     );
