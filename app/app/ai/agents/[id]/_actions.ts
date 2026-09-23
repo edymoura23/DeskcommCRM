@@ -31,6 +31,7 @@ import {
   PUBLISH_ERROR_CODES,
 } from "@/lib/ai/agents/validation";
 import { publishAgentVersion } from "@/lib/ai/agents/publish";
+import { draftVigente, proximoNumeroDeVersao } from "@/lib/ai/agents/versionamento";
 import { VALID_TOOL_IDS } from "@/lib/mcp/tools";
 
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -81,7 +82,7 @@ export async function saveAgentDraftAction(
   // Sanity: o agent existe e é da org? não está arquivado?
   const { data: agent } = await admin
     .from("ai_agents")
-    .select("id, kind, archived_at")
+    .select("id, kind, archived_at, published_version_id")
     .eq("id", agentId)
     .eq("organization_id", activeOrg.orgId)
     .maybeSingle();
@@ -99,16 +100,33 @@ export async function saveAgentDraftAction(
     return { ok: false, error: "validation_failed", message: mensagemDoEscopo(escopo) };
   }
 
-  // Procura draft existente (latest por version_number)
-  const { data: existingDraft } = await admin
+  // A linha do tempo inteira é pequena e permite decidir sem apagar história:
+  // draft <= publicada é registro histórico, nunca veículo de um novo save.
+  const { data: versionTimeline, error: timelineError } = await admin
     .from("ai_agent_versions")
-    .select("id, version_number")
+    .select("id, version_number, status")
     .eq("organization_id", activeOrg.orgId)
     .eq("agent_id", agentId)
-    .eq("status", "draft")
-    .order("version_number", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .order("version_number", { ascending: false });
+  if (timelineError) {
+    return { ok: false, error: "internal_error", message: timelineError.message };
+  }
+
+  const versions = (versionTimeline ?? []) as Array<{
+    id: string;
+    version_number: number;
+    status: string;
+  }>;
+  const published = agent.published_version_id
+    ? versions.find((version) => version.id === agent.published_version_id) ?? null
+    : null;
+  if (agent.published_version_id && !published) {
+    return { ok: false, error: "published_version_not_found" };
+  }
+  const existingDraft = draftVigente(
+    versions.filter((version) => version.status === "draft"),
+    published?.version_number ?? null,
+  );
 
   if (existingDraft) {
     // PATCH na draft existente — não infla a sequência de versions.
@@ -151,15 +169,20 @@ export async function saveAgentDraftAction(
 
   // Cria draft v(max+1) com retry em 23505.
   for (let attempt = 0; attempt < 3; attempt++) {
-    const { data: maxRow } = await admin
+    const { data: latestVersions, error: latestError } = await admin
       .from("ai_agent_versions")
-      .select("version_number")
+      .select("id, version_number")
       .eq("agent_id", agentId)
       .eq("organization_id", activeOrg.orgId)
       .order("version_number", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const nextNumber = (maxRow?.version_number ?? 0) + 1;
+      .limit(1);
+    if (latestError) {
+      return { ok: false, error: "internal_error", message: latestError.message };
+    }
+    const nextNumber = proximoNumeroDeVersao(
+      (latestVersions ?? []) as Array<{ id: string; version_number: number }>,
+      published?.version_number ?? null,
+    );
 
     const { data: created, error } = await admin
       .from("ai_agent_versions")
@@ -204,7 +227,11 @@ export async function saveAgentDraftAction(
         resourceType: "ai_agent_version",
         resourceId: created.id,
         requestId,
-        metadata: { agent_id: agentId, version_number: created.version_number },
+        metadata: {
+          agent_id: agentId,
+          version_number: created.version_number,
+          base_version_id: published?.id ?? null,
+        },
       });
       revalidatePath(`/app/ai/agents/${agentId}`);
       return { ok: true, data: { version_id: created.id, version_number: created.version_number } };

@@ -219,6 +219,7 @@ export type PublishErrorCode =
   | "agent_archived"
   | "version_not_found"
   | "version_invalid_state"
+  | "version_not_newer"
   | "credential_missing"
   | "credential_not_found"
   | "credential_inactive"
@@ -234,6 +235,7 @@ export const PUBLISH_ERROR_CODES: ReadonlySet<string> = new Set<PublishErrorCode
   "agent_archived",
   "version_not_found",
   "version_invalid_state",
+  "version_not_newer",
   "credential_missing",
   "credential_not_found",
   "credential_inactive",

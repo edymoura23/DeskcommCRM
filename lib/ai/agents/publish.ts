@@ -7,6 +7,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PUBLISH_ERROR_CODES, type PublishErrorCode } from "./validation";
+import { publicacaoAvancaLinhaDoTempo } from "./versionamento";
 
 export interface PublishOk {
   ok: true;
@@ -35,6 +36,54 @@ export async function publishAgentVersion(
   admin: SupabaseClient,
   params: { orgId: string; agentId: string; versionId: string },
 ): Promise<PublishResult> {
+  // Todos os caminhos de publicação passam por este wrapper. A RPC aceita
+  // superseded para suportar o revert por CLONE, mas publicar diretamente uma
+  // versão anterior recolocaria configuração velha no ar. O clone legítimo já
+  // nasce com número maior e passa por esta guarda.
+  const { data: agent, error: agentError } = await admin
+    .from("ai_agents")
+    .select("published_version_id")
+    .eq("id", params.agentId)
+    .eq("organization_id", params.orgId)
+    .maybeSingle();
+  if (agentError) {
+    return { ok: false, code: "internal_error", message: agentError.message };
+  }
+  if (!agent) {
+    return { ok: false, code: "agent_not_found", message: "agent_not_found" };
+  }
+
+  const ids = [params.versionId, agent.published_version_id].filter(
+    (id): id is string => typeof id === "string",
+  );
+  const { data: rows, error: versionsError } = await admin
+    .from("ai_agent_versions")
+    .select("id, agent_id, version_number")
+    .eq("organization_id", params.orgId)
+    .eq("agent_id", params.agentId)
+    .in("id", ids);
+  if (versionsError) {
+    return { ok: false, code: "internal_error", message: versionsError.message };
+  }
+  const versions = (rows ?? []) as Array<{
+    id: string;
+    agent_id: string;
+    version_number: number;
+  }>;
+  const target = versions.find((version) => version.id === params.versionId);
+  if (!target) {
+    return { ok: false, code: "version_not_found", message: "version_not_found" };
+  }
+  const current = agent.published_version_id
+    ? versions.find((version) => version.id === agent.published_version_id)
+    : null;
+  if (agent.published_version_id && !current) {
+    return { ok: false, code: "internal_error", message: "published_version_not_found" };
+  }
+  if (!publicacaoAvancaLinhaDoTempo(target.version_number, current?.version_number ?? null)) {
+    return { ok: false, code: "version_not_newer", message: "version_not_newer" };
+  }
+
   const { data, error } = await admin
     .rpc("fn_publish_ai_agent_version", {
       p_org_id: params.orgId,
