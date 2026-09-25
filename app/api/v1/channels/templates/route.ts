@@ -14,6 +14,7 @@ import type { NextRequest, NextResponse } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
+import { resolveMetaCreds } from "@/lib/channels/meta/credentials";
 import { metaSessionForOrg } from "@/lib/channels/meta/session";
 import { normalizeRejectedReason } from "@/lib/channels/meta/webhook";
 import { deriveTemplateContract, describeAddress } from "@/lib/channels/meta/template-contract";
@@ -155,15 +156,21 @@ export async function POST(_req: NextRequest): Promise<NextResponse> {
     return fail("invalid_request", "no_meta_channel", 400, { requestId });
   }
 
-  const token = process.env.META_SYSTEM_USER_TOKEN ?? "";
-  if (!token) return fail("invalid_request", "missing_meta_token", 400, { requestId });
+  // A credencial vem da sessão conectada na tela, com o ambiente apenas como
+  // fallback compatível e restrito ao mesmo número. Assim uma instalação
+  // multi-organização nunca sincroniza a WABA usando a conta de outro tenant.
+  const creds = await resolveMetaCreds(createAdminClient(), {
+    organizationId: r.orgId,
+    phoneNumberId: sessao.phoneNumberId ?? "",
+  });
+  if (!creds) return fail("invalid_request", "missing_meta_token", 400, { requestId });
 
   try {
     const counts = await syncTemplates({
       organizationId: r.orgId,
       wabaId: sessao.wabaId,
-      token,
-      graphVersion: process.env.META_GRAPH_VERSION ?? "v22.0",
+      token: creds.token,
+      graphVersion: creds.graphVersion,
     });
     return ok(counts);
   } catch (err) {

@@ -46,6 +46,15 @@ export async function sendTemplateForSession(
     throw new Error("template_incompleto: nome e idioma são obrigatórios em type=template");
   }
 
+  // A credencial é resolvida ANTES do espelho: sessão sem credencial é uma
+  // pendência recuperável (`meta_not_configured`), não uma falha de contrato do
+  // template. O par organização + PNID também impede fallback cross-tenant.
+  const creds = await resolveMetaCreds(createAdminClient(), {
+    organizationId: input.organizationId,
+    phoneNumberId: input.sessionRef,
+  });
+  if (!creds) throw new Error("meta_not_configured: sessão sem credencial utilizável");
+
   const { data: linha, error } = await db
     .from("meta_templates")
     .select("name, language, status, contract_hash, components")
@@ -55,14 +64,6 @@ export async function sendTemplateForSession(
     .maybeSingle();
 
   if (error) throw new Error(`template_lookup_failed: ${error.message}`);
-
-  // A RPC de decifragem é concedida somente a service_role. O escopo continua
-  // vindo da organização e da sessão já validadas pelo handler.
-  const creds = await resolveMetaCreds(createAdminClient(), {
-    organizationId: input.organizationId,
-    phoneNumberId: input.sessionRef,
-  });
-  if (!creds) throw new Error("meta_not_configured: sessão sem credencial utilizável");
 
   const resultado = await sendTemplate({
     phoneNumberId: creds.phoneNumberId,
